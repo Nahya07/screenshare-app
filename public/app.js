@@ -210,6 +210,9 @@ function switchTab(tab) {
   }
 }
 
+el.tabCreate.addEventListener("click", () => switchTab("create"));
+el.tabJoin.addEventListener("click", () => switchTab("join"));
+
 
 function setConnectionStatus(status) {
 
@@ -677,6 +680,14 @@ async function connectToRoomChannel(
 
       if (peers.length > 0) {
 
+        // Jika peer yang terdeteksi berubah (misalnya reconnect
+        // dengan id baru), reset koneksi WebRTC lama supaya
+        // tidak mengirim sinyal ke id yang sudah tidak valid.
+        if (peerId && peerId !== peers[0].id) {
+          cleanupPeerConnection();
+          resetRemoteVideo();
+        }
+
         peerId =
           peers[0].id;
 
@@ -690,6 +701,12 @@ async function connectToRoomChannel(
         );
 
       } else {
+
+        if (peerId) {
+          // Peer sebelumnya baru saja hilang dari presence
+          cleanupPeerConnection();
+          resetRemoteVideo();
+        }
 
         peerId = null;
 
@@ -714,6 +731,12 @@ async function connectToRoomChannel(
 
       if (
         payload.from === selfId
+      ) {
+        return;
+      }
+
+      if (
+        payload.to && payload.to !== selfId
       ) {
         return;
       }
@@ -1077,6 +1100,8 @@ async function ensurePeerConnection() {
   peerConnection.onconnectionstatechange =
     () => {
 
+      if (!peerConnection) return;
+
       const state =
         peerConnection.connectionState;
 
@@ -1131,22 +1156,22 @@ async function ensurePeerConnection() {
 
 
   // ============================================================
-  // ADD EXISTING LOCAL STREAM
+  // Jika localStream sudah ada sebelum peerConnection dibuat
+  // (misalnya sedang sharing lalu peer baru saja bergabung),
+  // pastikan track-nya ikut ditambahkan.
   // ============================================================
 
   if (localStream) {
 
-    localStream
-      .getTracks()
-      .forEach(
-        (track) => {
+    localStream.getTracks().forEach(
+      (track) => {
 
-          peerConnection.addTrack(
-            track,
-            localStream
-          );
-        }
-      );
+        peerConnection.addTrack(
+          track,
+          localStream
+        );
+      }
+    );
   }
 
 
@@ -1154,17 +1179,9 @@ async function ensurePeerConnection() {
 }
 
 
-// ================================================================
-// CLEANUP WEBRTC
-// ================================================================
-
 function cleanupPeerConnection() {
 
   if (peerConnection) {
-
-    peerConnection.ontrack = null;
-
-    peerConnection.onicecandidate = null;
 
     peerConnection.close();
 
@@ -1173,51 +1190,38 @@ function cleanupPeerConnection() {
 }
 
 
-// ================================================================
-// REMOTE VIDEO RESET
-// ================================================================
-
 function resetRemoteVideo() {
 
-  el.remoteVideo.srcObject =
-    null;
+  el.remoteVideo.srcObject = null;
 
-  el.remoteVideo.classList.add(
-    "hidden"
-  );
+  el.remoteVideo.classList.add("hidden");
 
-  el.remotePlaceholder.classList.remove(
-    "hidden"
-  );
+  el.remotePlaceholder.classList.remove("hidden");
 }
 
-
-// ================================================================
-// LOCAL VIDEO RESET
-// ================================================================
 
 function resetLocalVideo() {
 
-  el.localVideo.srcObject =
-    null;
+  el.localVideo.srcObject = null;
 
-  el.localVideo.classList.add(
-    "hidden"
-  );
+  el.localVideo.classList.add("hidden");
 
-  el.localPlaceholder.classList.remove(
-    "hidden"
-  );
+  el.localPlaceholder.classList.remove("hidden");
 }
 
 
 // ================================================================
-// START SCREEN SHARING
+// SCREEN SHARING — START / STOP
 // ================================================================
 
 el.btnStartShare.addEventListener(
   "click",
   startSharing
+);
+
+el.btnStopShare.addEventListener(
+  "click",
+  stopSharing
 );
 
 
@@ -1232,24 +1236,14 @@ async function startSharing() {
     return;
   }
 
-
-  if (isSharing) {
-
-    return;
-  }
-
-
   try {
 
     localStream =
       await navigator.mediaDevices.getDisplayMedia({
 
         video: {
-
           frameRate: {
-
             ideal: 30,
-
             max: 60
           }
         },
@@ -1265,77 +1259,40 @@ async function startSharing() {
     );
 
     alert(
-      "Tidak bisa memulai screen sharing. Pastikan izin layar diberikan."
+      "Tidak bisa memulai screen sharing. Pastikan Anda memberi izin."
     );
 
     return;
   }
 
+  el.localVideo.srcObject = localStream;
 
-  // ============================================================
-  // LOCAL PREVIEW
-  // ============================================================
+  el.localVideo.classList.remove("hidden");
 
-  el.localVideo.srcObject =
-    localStream;
-
-  el.localVideo.classList.remove(
-    "hidden"
-  );
-
-  el.localPlaceholder.classList.add(
-    "hidden"
-  );
-
-
-  // ============================================================
-  // CREATE PEER CONNECTION
-  // ============================================================
-
-  cleanupPeerConnection();
+  el.localPlaceholder.classList.add("hidden");
 
   await ensurePeerConnection();
 
+  localStream.getTracks().forEach(
+    (track) => {
 
-  // ============================================================
-  // ADD TRACKS
-  // ============================================================
+      peerConnection.addTrack(
+        track,
+        localStream
+      );
+    }
+  );
 
-  localStream
-    .getTracks()
-    .forEach(
-      (track) => {
-
-        peerConnection.addTrack(
-          track,
-          localStream
-        );
-      }
-    );
-
-
-  // ============================================================
-  // CREATE OFFER
-  // ============================================================
+  // Buat & kirim offer ke peer
 
   const offer =
     await peerConnection.createOffer();
 
-
-  await peerConnection
-    .setLocalDescription(
-      offer
-    );
-
-
-  // ============================================================
-  // SEND OFFER VIA SUPABASE
-  // ============================================================
+  await peerConnection.setLocalDescription(offer);
 
   await sendSignal(
     "webrtc-offer",
     {
-
       from: selfId,
 
       to: peerId,
@@ -1344,20 +1301,21 @@ async function startSharing() {
     }
   );
 
+  // Jika user menghentikan share lewat tombol browser bawaan
+  // ("Stop sharing" di notifikasi browser)
 
-  // ============================================================
-  // SHARING STATUS
-  // ============================================================
+  localStream.getVideoTracks()[0].addEventListener(
+    "ended",
+    stopSharing
+  );
 
   isSharing = true;
 
   updateShareButtons();
 
-
   await sendSignal(
     "sharing-status",
     {
-
       from: selfId,
 
       to: peerId,
@@ -1365,68 +1323,31 @@ async function startSharing() {
       isSharing: true
     }
   );
-
-
-  // ============================================================
-  // BROWSER STOP SHARING
-  // ============================================================
-
-  const videoTrack =
-    localStream.getVideoTracks()[0];
-
-  if (videoTrack) {
-
-    videoTrack.addEventListener(
-      "ended",
-      () => {
-
-        stopSharing();
-      },
-      {
-        once: true
-      }
-    );
-  }
 }
 
 
-// ================================================================
-// STOP SCREEN SHARING
-// ================================================================
+function stopSharing() {
 
-async function stopSharing() {
+  if (localStream) {
 
-  if (
-    localStream
-  ) {
-
-    localStream
-      .getTracks()
-      .forEach(
-        (track) => {
-
-          track.stop();
-        }
-      );
+    localStream.getTracks().forEach(
+      (track) => track.stop()
+    );
 
     localStream = null;
   }
 
-
   resetLocalVideo();
-
 
   isSharing = false;
 
   updateShareButtons();
 
-
   if (peerId) {
 
-    await sendSignal(
+    sendSignal(
       "sharing-status",
       {
-
         from: selfId,
 
         to: peerId,
@@ -1436,22 +1357,18 @@ async function stopSharing() {
     );
   }
 
+  // Tutup & bangun ulang koneksi supaya bersih
+  // untuk sesi share berikutnya
 
   cleanupPeerConnection();
 }
 
 
-// ================================================================
-// SHARE BUTTON UI
-// ================================================================
-
 function updateShareButtons() {
 
-  el.btnStartShare.disabled =
-    isSharing;
+  el.btnStartShare.disabled = isSharing;
 
-  el.btnStopShare.disabled =
-    !isSharing;
+  el.btnStopShare.disabled = !isSharing;
 
   el.btnStartShare.classList.toggle(
     "opacity-40",
@@ -1477,75 +1394,33 @@ el.btnLeaveRoom.addEventListener(
 
 async function leaveRoom() {
 
-  try {
+  if (localStream) {
 
-    // Stop local stream
-
-    if (localStream) {
-
-      localStream
-        .getTracks()
-        .forEach(
-          (track) => {
-
-            track.stop();
-          }
-        );
-
-      localStream = null;
-    }
-
-
-    // Close WebRTC
-
-    cleanupPeerConnection();
-
-
-    // Remove presence + channel
-
-    if (roomChannel) {
-
-      try {
-
-        await roomChannel.untrack();
-
-      } catch (error) {
-
-        console.warn(
-          "Gagal untrack presence:",
-          error
-        );
-      }
-
-
-      await supabaseClient
-        .removeChannel(
-          roomChannel
-        );
-
-      roomChannel = null;
-    }
-
-
-  } catch (error) {
-
-    console.error(
-      "Leave room error:",
-      error
+    localStream.getTracks().forEach(
+      (track) => track.stop()
     );
+
+    localStream = null;
   }
 
+  cleanupPeerConnection();
 
-  // Reset state
+  if (roomChannel) {
+
+    await roomChannel.untrack();
+
+    await supabaseClient.removeChannel(roomChannel);
+
+    roomChannel = null;
+  }
 
   currentRoomCode = null;
 
   peerId = null;
 
-  isInRoom = false;
-
   isSharing = false;
 
+  isInRoom = false;
 
   resetRemoteVideo();
 
@@ -1553,37 +1428,22 @@ async function leaveRoom() {
 
   updateShareButtons();
 
+  el.createdRoomInfo.classList.add("hidden");
 
-  // Reset form
+  el.createRoomCode.value = "";
 
-  el.createdRoomInfo.classList.add(
-    "hidden"
-  );
+  el.createRoomPassword.value = "";
 
-  el.createRoomCode.value =
-    "";
+  el.joinRoomCode.value = "";
 
-  el.createRoomPassword.value =
-    "";
-
-  el.joinRoomCode.value =
-    "";
-
-  el.joinRoomPassword.value =
-    "";
-
-
-  setConnectionStatus(
-    "waiting"
-  );
-
+  el.joinRoomPassword.value = "";
 
   goToEntryScreen();
 }
 
 
 // ================================================================
-// BROWSER / TAB CLOSED
+// CLEANUP SAAT TAB DITUTUP
 // ================================================================
 
 window.addEventListener(
@@ -1592,14 +1452,9 @@ window.addEventListener(
 
     if (localStream) {
 
-      localStream
-        .getTracks()
-        .forEach(
-          (track) => {
-
-            track.stop();
-          }
-        );
+      localStream.getTracks().forEach(
+        (track) => track.stop()
+      );
     }
 
     if (roomChannel) {
@@ -1611,18 +1466,9 @@ window.addEventListener(
 
 
 // ================================================================
-// INITIALIZATION
+// INISIALISASI AWAL
 // ================================================================
 
 updateShareButtons();
 
 switchTab("create");
-
-setConnectionStatus(
-  "waiting"
-);
-
-
-console.log(
-  "✅ P2P ScreenShare Supabase initialized."
-);
