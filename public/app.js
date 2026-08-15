@@ -1,14 +1,34 @@
 /**
  * app.js
- * Logika frontend untuk P2P ScreenShare:
- * - Manajemen room (buat/gabung) via Socket.io signaling
- * - WebRTC PeerConnection untuk transmisi screen-share langsung P2P
- * - Update status koneksi (Connected / Disconnected / Reconnecting)
+ * Frontend P2P ScreenShare
+ *
+ * Signaling:
+ * - Supabase Realtime Broadcast
+ * - Supabase Realtime Presence
+ *
+ * Media:
+ * - WebRTC P2P langsung antar-browser
+ * - Screen/audio TIDAK dikirim melalui Supabase
  */
 
-// ------------------------------------------------------------------
-// Konfigurasi STUN server publik gratis (fallback jika ada NAT/firewall)
-// ------------------------------------------------------------------
+// ================================================================
+// SUPABASE CONFIG
+// ================================================================
+
+const SUPABASE_URL = "https://yoehxwgradptpvpgujlx.supabase.co";
+
+const SUPABASE_PUBLISHABLE_KEY =
+  "sb_publishable_sZv6Aj53i98DPKDoMA3sTw_ZMGODu4a";
+
+const supabaseClient = window.supabase.createClient(
+  SUPABASE_URL,
+  SUPABASE_PUBLISHABLE_KEY
+);
+
+// ================================================================
+// WEBRTC CONFIG
+// ================================================================
+
 const ICE_SERVERS = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
@@ -18,21 +38,30 @@ const ICE_SERVERS = {
   ],
 };
 
-// ------------------------------------------------------------------
-// State global
-// ------------------------------------------------------------------
-const socket = io(); // otomatis connect ke origin yang sama (server.js)
+// ================================================================
+// GLOBAL STATE
+// ================================================================
 
 let currentRoomCode = null;
-let selfId = null;
-let peerId = null; // id socket lawan bicara (hanya 1, karena max 2 party)
+let currentPassword = null;
+
+let selfId = crypto.randomUUID();
+let peerId = null;
+
+let channel = null;
 let peerConnection = null;
 let localStream = null;
-let isSharing = false;
 
-// ------------------------------------------------------------------
-// Referensi elemen DOM
-// ------------------------------------------------------------------
+let isSharing = false;
+let isHost = false;
+
+// Untuk mencegah ICE candidate masuk sebelum remote description siap
+const pendingIceCandidates = [];
+
+// ================================================================
+// DOM REFERENCES
+// ================================================================
+
 const el = {
   screenEntry: document.getElementById("screen-entry"),
   screenRoom: document.getElementById("screen-room"),
@@ -47,6 +76,7 @@ const el = {
   createRoomCode: document.getElementById("create-room-code"),
   createRoomPassword: document.getElementById("create-room-password"),
   btnCreateRoom: document.getElementById("btn-create-room"),
+
   createdRoomInfo: document.getElementById("created-room-info"),
   displayRoomCode: document.getElementById("display-room-code"),
   displayRoomPassword: document.getElementById("display-room-password"),
@@ -65,6 +95,7 @@ const el = {
 
   remoteVideo: document.getElementById("remote-video"),
   remotePlaceholder: document.getElementById("remote-placeholder"),
+
   localVideo: document.getElementById("local-video"),
   localPlaceholder: document.getElementById("local-placeholder"),
 
@@ -72,13 +103,15 @@ const el = {
   btnStopShare: document.getElementById("btn-stop-share"),
 };
 
-// ------------------------------------------------------------------
-// Helper UI kecil
-// ------------------------------------------------------------------
+// ================================================================
+// UI HELPERS
+// ================================================================
+
 function showError(message) {
   el.entryError.textContent = message;
   el.entryError.classList.remove("hidden");
 }
+
 function clearError() {
   el.entryError.classList.add("hidden");
   el.entryError.textContent = "";
@@ -86,46 +119,83 @@ function clearError() {
 
 function switchTab(tab) {
   clearError();
+
   if (tab === "create") {
     el.tabCreate.classList.add("bg-indigo-600", "text-white");
     el.tabCreate.classList.remove("text-slate-300");
+
     el.tabJoin.classList.remove("bg-indigo-600", "text-white");
     el.tabJoin.classList.add("text-slate-300");
+
     el.panelCreate.classList.remove("hidden");
     el.panelJoin.classList.add("hidden");
   } else {
     el.tabJoin.classList.add("bg-indigo-600", "text-white");
     el.tabJoin.classList.remove("text-slate-300");
+
     el.tabCreate.classList.remove("bg-indigo-600", "text-white");
     el.tabCreate.classList.add("text-slate-300");
+
     el.panelJoin.classList.remove("hidden");
     el.panelCreate.classList.add("hidden");
   }
 }
+
 el.tabCreate.addEventListener("click", () => switchTab("create"));
 el.tabJoin.addEventListener("click", () => switchTab("join"));
 
-/**
- * setConnectionStatus
- * status: "waiting" | "connected" | "disconnecting" | "reconnecting" | "disconnected"
- */
+// ================================================================
+// CONNECTION STATUS
+// ================================================================
+
 function setConnectionStatus(status) {
   const map = {
-    waiting: { color: "bg-yellow-400", text: "Menunggu peer bergabung...", pulse: true },
-    connected: { color: "bg-emerald-400", text: "Connected", pulse: false },
-    disconnecting: { color: "bg-orange-400", text: "Disconnecting...", pulse: true },
-    reconnecting: { color: "bg-orange-400", text: "Reconnecting...", pulse: true },
-    disconnected: { color: "bg-red-400", text: "Disconnected — peer keluar", pulse: false },
+    waiting: {
+      color: "bg-yellow-400",
+      text: "Menunggu peer bergabung...",
+      pulse: true,
+    },
+
+    connected: {
+      color: "bg-emerald-400",
+      text: "Connected",
+      pulse: false,
+    },
+
+    disconnecting: {
+      color: "bg-orange-400",
+      text: "Disconnecting...",
+      pulse: true,
+    },
+
+    reconnecting: {
+      color: "bg-orange-400",
+      text: "Reconnecting...",
+      pulse: true,
+    },
+
+    disconnected: {
+      color: "bg-red-400",
+      text: "Disconnected — peer keluar",
+      pulse: false,
+    },
   };
+
   const s = map[status] || map.waiting;
-  el.statusDot.className = `w-2 h-2 rounded-full ${s.color}` + (s.pulse ? " pulse-dot" : "");
+
+  el.statusDot.className =
+    `w-2 h-2 rounded-full ${s.color}` +
+    (s.pulse ? " pulse-dot" : "");
+
   el.statusText.textContent = s.text;
 }
 
 function goToRoomScreen(roomCode) {
   el.screenEntry.classList.add("hidden");
   el.screenRoom.classList.remove("hidden");
+
   el.headerRoomCode.textContent = roomCode;
+
   setConnectionStatus(peerId ? "connected" : "waiting");
 }
 
@@ -134,308 +204,1007 @@ function goToEntryScreen() {
   el.screenEntry.classList.remove("hidden");
 }
 
-// ------------------------------------------------------------------
+// ================================================================
+// ROOM ID / PASSWORD
+// ================================================================
+
+function generateRoomCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+  let code = "";
+
+  for (let i = 0; i < 6; i++) {
+    code += chars[Math.floor(Math.random() * chars.length)];
+  }
+
+  return code;
+}
+
+function generatePassword() {
+  const chars =
+    "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+
+  let password = "";
+
+  for (let i = 0; i < 6; i++) {
+    password += chars[Math.floor(Math.random() * chars.length)];
+  }
+
+  return password;
+}
+
+// ================================================================
+// SUPABASE CHANNEL
+// ================================================================
+
+async function createRoomChannel(roomCode) {
+  if (channel) {
+    try {
+      await supabaseClient.removeChannel(channel);
+    } catch (err) {
+      console.warn("Gagal menghapus channel lama:", err);
+    }
+
+    channel = null;
+  }
+
+  channel = supabaseClient.channel(`screenshare:${roomCode}`, {
+    config: {
+      presence: {
+        key: selfId,
+      },
+    },
+  });
+
+  // --------------------------------------------------------------
+  // PRESENCE
+  // --------------------------------------------------------------
+
+  channel.on("presence", { event: "sync" }, () => {
+    handlePresenceSync();
+  });
+
+  channel.on("presence", { event: "join" }, ({ key, newPresences }) => {
+    console.log("Peer join:", key, newPresences);
+
+    if (key !== selfId) {
+      peerId = key;
+
+      setConnectionStatus("connected");
+
+      // Host memberi tahu peer baru bahwa dia siap.
+      if (isHost) {
+        sendSignal({
+          type: "peer-ready",
+        });
+      }
+    }
+  });
+
+  channel.on("presence", { event: "leave" }, ({ key }) => {
+    console.log("Peer leave:", key);
+
+    if (key === peerId) {
+      peerId = null;
+
+      cleanupPeerConnection();
+      resetRemoteVideo();
+
+      setConnectionStatus("disconnected");
+    }
+  });
+
+  // --------------------------------------------------------------
+  // BROADCAST SIGNALING
+  // --------------------------------------------------------------
+
+  channel.on(
+    "broadcast",
+    { event: "signal" },
+    async ({ payload }) => {
+      await handleSignal(payload);
+    }
+  );
+
+  const status = await channel.subscribe(async (status) => {
+    console.log("Supabase channel status:", status);
+
+    if (status === "SUBSCRIBED") {
+      await channel.track({
+        id: selfId,
+        name: el.inputName.value.trim() || "Anonim",
+        joinedAt: Date.now(),
+      });
+
+      console.log("Supabase Realtime connected.");
+    }
+  });
+
+  if (status !== "ok") {
+    throw new Error("Gagal terhubung ke Supabase Realtime.");
+  }
+}
+
+// ================================================================
+// PRESENCE
+// ================================================================
+
+function handlePresenceSync() {
+  if (!channel) return;
+
+  const state = channel.presenceState();
+
+  const peerKeys = Object.keys(state).filter(
+    (key) => key !== selfId
+  );
+
+  console.log("Presence state:", state);
+
+  if (peerKeys.length > 0) {
+    if (peerKeys.length > 1) {
+      console.warn("Room memiliki lebih dari 2 peserta.");
+    }
+
+    peerId = peerKeys[0];
+
+    setConnectionStatus("connected");
+
+    // Host memberi tahu peer bahwa dia siap.
+    if (isHost) {
+      sendSignal({
+        type: "peer-ready",
+      });
+    }
+  } else {
+    peerId = null;
+    setConnectionStatus("waiting");
+  }
+}
+
+// ================================================================
+// BROADCAST SIGNAL
+// ================================================================
+
+async function sendSignal(payload) {
+  if (!channel) {
+    console.warn("Channel belum tersedia.");
+    return;
+  }
+
+  try {
+    await channel.send({
+      type: "broadcast",
+      event: "signal",
+      payload: {
+        ...payload,
+        from: selfId,
+      },
+    });
+  } catch (err) {
+    console.error("Gagal mengirim signaling:", err);
+  }
+}
+
+// ================================================================
+// SIGNAL HANDLER
+// ================================================================
+
+async function handleSignal(payload) {
+  if (!payload) return;
+
+  // Abaikan pesan sendiri
+  if (payload.from === selfId) return;
+
+  console.log("Signal received:", payload.type);
+
+  // --------------------------------------------------------------
+  // PEER READY
+  // --------------------------------------------------------------
+
+  if (payload.type === "peer-ready") {
+    peerId = payload.from;
+
+    setConnectionStatus("connected");
+
+    // Host yang membuat room bertanggung jawab membuat offer
+    // ketika sudah ada peer.
+    if (isHost && !isSharing) {
+      console.log("Peer siap.");
+    }
+
+    return;
+  }
+
+  // --------------------------------------------------------------
+  // START SHARING REQUEST
+  // --------------------------------------------------------------
+
+  if (payload.type === "sharing-status") {
+    if (!payload.isSharing) {
+      resetRemoteVideo();
+    }
+
+    return;
+  }
+
+  // --------------------------------------------------------------
+  // WEBRTC OFFER
+  // --------------------------------------------------------------
+
+  if (payload.type === "webrtc-offer") {
+    peerId = payload.from;
+
+    try {
+      await ensurePeerConnection();
+
+      await peerConnection.setRemoteDescription(
+        new RTCSessionDescription(payload.offer)
+      );
+
+      await flushPendingIceCandidates();
+
+      const answer = await peerConnection.createAnswer();
+
+      await peerConnection.setLocalDescription(answer);
+
+      await sendSignal({
+        type: "webrtc-answer",
+        to: payload.from,
+        answer,
+      });
+    } catch (err) {
+      console.error("Gagal menangani offer:", err);
+    }
+
+    return;
+  }
+
+  // --------------------------------------------------------------
+  // WEBRTC ANSWER
+  // --------------------------------------------------------------
+
+  if (payload.type === "webrtc-answer") {
+    if (!peerConnection) return;
+
+    try {
+      await peerConnection.setRemoteDescription(
+        new RTCSessionDescription(payload.answer)
+      );
+
+      await flushPendingIceCandidates();
+    } catch (err) {
+      console.error("Gagal menangani answer:", err);
+    }
+
+    return;
+  }
+
+  // --------------------------------------------------------------
+  // ICE CANDIDATE
+  // --------------------------------------------------------------
+
+  if (payload.type === "webrtc-ice-candidate") {
+    if (!payload.candidate) return;
+
+    const candidate = new RTCIceCandidate(payload.candidate);
+
+    if (
+      peerConnection &&
+      peerConnection.remoteDescription
+    ) {
+      try {
+        await peerConnection.addIceCandidate(candidate);
+      } catch (err) {
+        console.warn("Gagal add ICE candidate:", err);
+      }
+    } else {
+      pendingIceCandidates.push(candidate);
+    }
+
+    return;
+  }
+
+  // --------------------------------------------------------------
+  // RECONNECT SIGNAL
+  // --------------------------------------------------------------
+
+  if (payload.type === "reconnect-signal") {
+    setConnectionStatus("reconnecting");
+    return;
+  }
+}
+
+// ================================================================
 // ROOM CREATION
-// ------------------------------------------------------------------
-el.btnCreateRoom.addEventListener("click", () => {
+// ================================================================
+
+el.btnCreateRoom.addEventListener("click", async () => {
   clearError();
-  const name = el.inputName.value.trim() || "Anonim";
-  const roomCode = el.createRoomCode.value.trim();
-  const password = el.createRoomPassword.value.trim();
+
+  const name =
+    el.inputName.value.trim() || "Anonim";
+
+  let roomCode =
+    el.createRoomCode.value.trim().toUpperCase();
+
+  let password =
+    el.createRoomPassword.value.trim();
+
+  if (!roomCode) {
+    roomCode = generateRoomCode();
+  }
+
+  if (!password) {
+    password = generatePassword();
+  }
 
   el.btnCreateRoom.disabled = true;
   el.btnCreateRoom.textContent = "Membuat room...";
 
-  socket.emit("create-room", { roomCode, password, name }, (res) => {
-    el.btnCreateRoom.disabled = false;
-    el.btnCreateRoom.textContent = "Buat Room Baru";
+  try {
+    /*
+     * Kita tidak menggunakan database untuk room.
+     * Room dibuat berdasarkan channel Realtime.
+     *
+     * Password tetap ditampilkan kepada host.
+     */
 
-    if (!res.ok) {
-      showError(res.error || "Gagal membuat room.");
-      return;
-    }
+    currentRoomCode = roomCode;
+    currentPassword = password;
 
-    el.displayRoomCode.textContent = res.roomCode;
-    el.displayRoomPassword.textContent = res.password;
+    isHost = true;
+
+    el.displayRoomCode.textContent = roomCode;
+    el.displayRoomPassword.textContent = password;
+
     el.createdRoomInfo.classList.remove("hidden");
 
-    // Simpan sementara untuk tombol "Masuk ke Room"
-    el.btnEnterCreatedRoom.dataset.roomCode = res.roomCode;
-    el.btnEnterCreatedRoom.dataset.password = res.password;
-  });
+    el.btnEnterCreatedRoom.dataset.roomCode = roomCode;
+    el.btnEnterCreatedRoom.dataset.password = password;
+
+    console.log("Room dibuat:", roomCode);
+
+  } catch (err) {
+    console.error(err);
+    showError("Gagal membuat room.");
+  } finally {
+    el.btnCreateRoom.disabled = false;
+    el.btnCreateRoom.textContent = "Buat Room Baru";
+  }
 });
 
-el.btnEnterCreatedRoom.addEventListener("click", () => {
-  const roomCode = el.btnEnterCreatedRoom.dataset.roomCode;
-  const password = el.btnEnterCreatedRoom.dataset.password;
-  const name = el.inputName.value.trim() || "Anonim";
-  doJoinRoom(roomCode, password, name);
+// ================================================================
+// ENTER CREATED ROOM
+// ================================================================
+
+el.btnEnterCreatedRoom.addEventListener("click", async () => {
+  const roomCode =
+    el.btnEnterCreatedRoom.dataset.roomCode;
+
+  const password =
+    el.btnEnterCreatedRoom.dataset.password;
+
+  const name =
+    el.inputName.value.trim() || "Anonim";
+
+  await doJoinRoom(roomCode, password, name, true);
 });
 
-// ------------------------------------------------------------------
-// ROOM JOIN
-// ------------------------------------------------------------------
-el.btnJoinRoom.addEventListener("click", () => {
+// ================================================================
+// JOIN ROOM
+// ================================================================
+
+el.btnJoinRoom.addEventListener("click", async () => {
   clearError();
-  const name = el.inputName.value.trim() || "Anonim";
-  const roomCode = el.joinRoomCode.value.trim();
-  const password = el.joinRoomPassword.value.trim();
+
+  const name =
+    el.inputName.value.trim() || "Anonim";
+
+  const roomCode =
+    el.joinRoomCode.value.trim().toUpperCase();
+
+  const password =
+    el.joinRoomPassword.value.trim();
 
   if (!roomCode || !password) {
     showError("Kode room dan password wajib diisi.");
     return;
   }
-  doJoinRoom(roomCode, password, name);
+
+  await doJoinRoom(roomCode, password, name, false);
 });
 
-function doJoinRoom(roomCode, password, name) {
+// ================================================================
+// JOIN ROOM FUNCTION
+// ================================================================
+
+async function doJoinRoom(
+  roomCode,
+  password,
+  name,
+  host
+) {
   clearError();
-  el.btnJoinRoom.disabled = true;
 
-  socket.emit("join-room", { roomCode, password, name }, (res) => {
-    el.btnJoinRoom.disabled = false;
+  if (!roomCode) {
+    showError("Kode room tidak boleh kosong.");
+    return;
+  }
 
-    if (!res.ok) {
-      showError(res.error || "Gagal bergabung ke room.");
-      return;
-    }
+  try {
+    currentRoomCode = roomCode.toUpperCase();
+    currentPassword = password;
+    isHost = !!host;
 
-    currentRoomCode = res.roomCode;
-    selfId = res.selfId;
+    /*
+     * Karena tidak ada server pusat yang menyimpan room,
+     * password digunakan sebagai bagian dari validasi channel.
+     *
+     * Kita membuat nama channel berdasarkan room + hash password.
+     */
 
-    if (res.peers && res.peers.length > 0) {
-      peerId = res.peers[0];
-    }
+    const channelRoomName =
+      await createSecureChannelName(
+        currentRoomCode,
+        currentPassword
+      );
+
+    await createRoomChannel(channelRoomName);
 
     goToRoomScreen(currentRoomCode);
-  });
+
+    console.log(
+      `Berhasil masuk room ${currentRoomCode}`
+    );
+
+  } catch (err) {
+    console.error("Join room error:", err);
+
+    showError(
+      err.message ||
+      "Gagal bergabung ke room."
+    );
+
+    currentRoomCode = null;
+    currentPassword = null;
+    isHost = false;
+  }
 }
 
-// ------------------------------------------------------------------
-// SOCKET EVENTS — signaling & presence
-// ------------------------------------------------------------------
-socket.on("peer-joined", ({ peerId: newPeerId, name }) => {
-  peerId = newPeerId;
-  setConnectionStatus("connected");
-  console.log(`Peer bergabung: ${name} (${newPeerId})`);
-});
+// ================================================================
+// CREATE SECURE CHANNEL NAME
+// ================================================================
 
-socket.on("peer-left", () => {
-  setConnectionStatus("disconnected");
-  cleanupPeerConnection();
-  resetRemoteVideo();
-  peerId = null;
-});
+async function createSecureChannelName(
+  roomCode,
+  password
+) {
+  const encoder =
+    new TextEncoder();
 
-socket.on("disconnect", () => {
-  if (currentRoomCode) {
-    setConnectionStatus("reconnecting");
-  }
-});
+  const data =
+    encoder.encode(
+      `${roomCode}:${password}`
+    );
 
-socket.on("connect", () => {
-  // Jika sebelumnya di dalam room lalu socket sempat putus & reconnect,
-  // browser Socket.io client akan otomatis reconnect ke server.
-  if (currentRoomCode && peerId) {
-    setConnectionStatus("connected");
-  }
-});
+  const hashBuffer =
+    await crypto.subtle.digest(
+      "SHA-256",
+      data
+    );
 
-socket.on("reconnect-signal", () => {
-  setConnectionStatus("reconnecting");
-});
+  const hashArray =
+    Array.from(
+      new Uint8Array(hashBuffer)
+    );
 
-socket.on("sharing-status", ({ isSharing: peerIsSharing }) => {
-  if (!peerIsSharing) {
-    resetRemoteVideo();
-  }
-});
+  const hash =
+    hashArray
+      .map((b) =>
+        b.toString(16).padStart(2, "0")
+      )
+      .join("");
 
-// --- WebRTC signaling relay ---
-socket.on("webrtc-offer", async ({ from, offer }) => {
-  peerId = from;
-  await ensurePeerConnection();
-  await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
-  const answer = await peerConnection.createAnswer();
-  await peerConnection.setLocalDescription(answer);
-  socket.emit("webrtc-answer", { to: from, answer });
-});
+  return `${roomCode}-${hash.substring(0, 16)}`;
+}
 
-socket.on("webrtc-answer", async ({ answer }) => {
-  if (!peerConnection) return;
-  await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
-});
+// ================================================================
+// WEBRTC PEER CONNECTION
+// ================================================================
 
-socket.on("webrtc-ice-candidate", async ({ candidate }) => {
-  if (!peerConnection || !candidate) return;
-  try {
-    await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-  } catch (err) {
-    console.warn("Gagal menambahkan ICE candidate:", err);
-  }
-});
-
-// ------------------------------------------------------------------
-// WEBRTC — PeerConnection setup
-// ------------------------------------------------------------------
 async function ensurePeerConnection() {
-  if (peerConnection) return peerConnection;
+  if (peerConnection) {
+    return peerConnection;
+  }
 
-  peerConnection = new RTCPeerConnection(ICE_SERVERS);
+  peerConnection =
+    new RTCPeerConnection(
+      ICE_SERVERS
+    );
 
-  peerConnection.onicecandidate = (event) => {
-    if (event.candidate && peerId) {
-      socket.emit("webrtc-ice-candidate", { to: peerId, candidate: event.candidate });
-    }
-  };
+  // --------------------------------------------------------------
+  // ICE
+  // --------------------------------------------------------------
 
-  peerConnection.ontrack = (event) => {
-    el.remoteVideo.srcObject = event.streams[0];
-    el.remoteVideo.classList.remove("hidden");
-    el.remotePlaceholder.classList.add("hidden");
-  };
+  peerConnection.onicecandidate =
+    async (event) => {
+      if (!event.candidate || !peerId) {
+        return;
+      }
 
-  peerConnection.onconnectionstatechange = () => {
-    const state = peerConnection.connectionState;
-    console.log("PeerConnection state:", state);
-    if (state === "connected") {
-      setConnectionStatus("connected");
-    } else if (state === "disconnected") {
-      setConnectionStatus("reconnecting");
-    } else if (state === "failed" || state === "closed") {
-      setConnectionStatus("disconnected");
-      resetRemoteVideo();
-    }
-  };
+      await sendSignal({
+        type: "webrtc-ice-candidate",
+        to: peerId,
+        candidate: event.candidate,
+      });
+    };
 
-  // Jika kita sudah punya localStream (sedang sharing) sebelum peerConnection dibuat,
-  // pastikan track ikut ditambahkan.
+  // --------------------------------------------------------------
+  // REMOTE TRACK
+  // --------------------------------------------------------------
+
+  peerConnection.ontrack =
+    (event) => {
+      console.log("Remote track diterima.");
+
+      if (event.streams && event.streams[0]) {
+        el.remoteVideo.srcObject =
+          event.streams[0];
+
+        el.remoteVideo.classList.remove(
+          "hidden"
+        );
+
+        el.remotePlaceholder.classList.add(
+          "hidden"
+        );
+      }
+    };
+
+  // --------------------------------------------------------------
+  // CONNECTION STATE
+  // --------------------------------------------------------------
+
+  peerConnection.onconnectionstatechange =
+    () => {
+      if (!peerConnection) return;
+
+      const state =
+        peerConnection.connectionState;
+
+      console.log(
+        "PeerConnection state:",
+        state
+      );
+
+      if (state === "connected") {
+        setConnectionStatus("connected");
+      }
+
+      if (state === "disconnected") {
+        setConnectionStatus("reconnecting");
+      }
+
+      if (
+        state === "failed" ||
+        state === "closed"
+      ) {
+        setConnectionStatus(
+          "disconnected"
+        );
+
+        resetRemoteVideo();
+      }
+    };
+
+  // --------------------------------------------------------------
+  // LOCAL TRACK
+  // --------------------------------------------------------------
+
   if (localStream) {
-    localStream.getTracks().forEach((track) => {
-      peerConnection.addTrack(track, localStream);
-    });
+    localStream
+      .getTracks()
+      .forEach((track) => {
+        peerConnection.addTrack(
+          track,
+          localStream
+        );
+      });
   }
 
   return peerConnection;
 }
 
-function cleanupPeerConnection() {
-  if (peerConnection) {
-    peerConnection.close();
-    peerConnection = null;
+// ================================================================
+// FLUSH ICE CANDIDATES
+// ================================================================
+
+async function flushPendingIceCandidates() {
+  if (
+    !peerConnection ||
+    !peerConnection.remoteDescription
+  ) {
+    return;
+  }
+
+  while (
+    pendingIceCandidates.length > 0
+  ) {
+    const candidate =
+      pendingIceCandidates.shift();
+
+    try {
+      await peerConnection.addIceCandidate(
+        candidate
+      );
+    } catch (err) {
+      console.warn(
+        "Gagal menambahkan queued ICE candidate:",
+        err
+      );
+    }
   }
 }
 
+// ================================================================
+// CLEANUP PEER CONNECTION
+// ================================================================
+
+function cleanupPeerConnection() {
+  if (peerConnection) {
+    try {
+      peerConnection.onicecandidate = null;
+      peerConnection.ontrack = null;
+
+      peerConnection.close();
+    } catch (err) {
+      console.warn(
+        "Cleanup peer error:",
+        err
+      );
+    }
+
+    peerConnection = null;
+  }
+
+  pendingIceCandidates.length = 0;
+}
+
+// ================================================================
+// REMOTE VIDEO
+// ================================================================
+
 function resetRemoteVideo() {
   el.remoteVideo.srcObject = null;
-  el.remoteVideo.classList.add("hidden");
-  el.remotePlaceholder.classList.remove("hidden");
+
+  el.remoteVideo.classList.add(
+    "hidden"
+  );
+
+  el.remotePlaceholder.classList.remove(
+    "hidden"
+  );
 }
+
+// ================================================================
+// LOCAL VIDEO
+// ================================================================
 
 function resetLocalVideo() {
   el.localVideo.srcObject = null;
-  el.localVideo.classList.add("hidden");
-  el.localPlaceholder.classList.remove("hidden");
+
+  el.localVideo.classList.add(
+    "hidden"
+  );
+
+  el.localPlaceholder.classList.remove(
+    "hidden"
+  );
 }
 
-// ------------------------------------------------------------------
-// SCREEN SHARING — Start / Stop
-// ------------------------------------------------------------------
-el.btnStartShare.addEventListener("click", startSharing);
-el.btnStopShare.addEventListener("click", stopSharing);
+// ================================================================
+// START SCREEN SHARING
+// ================================================================
+
+el.btnStartShare.addEventListener(
+  "click",
+  startSharing
+);
+
+el.btnStopShare.addEventListener(
+  "click",
+  stopSharing
+);
 
 async function startSharing() {
   if (!peerId) {
-    alert("Tunggu hingga peer lain bergabung ke room terlebih dahulu.");
+    alert(
+      "Tunggu hingga peer lain bergabung ke room terlebih dahulu."
+    );
+
     return;
   }
 
   try {
-    localStream = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: { ideal: 30, max: 60 } },
-      audio: true, // ikut share audio sistem jika didukung browser
-    });
+    localStream =
+      await navigator.mediaDevices.getDisplayMedia(
+        {
+          video: {
+            frameRate: {
+              ideal: 30,
+              max: 60,
+            },
+          },
+
+          audio: true,
+        }
+      );
+
   } catch (err) {
-    console.error("Gagal mengambil layar:", err);
-    alert("Tidak bisa memulai screen sharing. Pastikan Anda memberi izin.");
+    console.error(
+      "Gagal mengambil layar:",
+      err
+    );
+
+    alert(
+      "Tidak bisa memulai screen sharing. Pastikan izin screen sharing diberikan."
+    );
+
     return;
   }
 
-  el.localVideo.srcObject = localStream;
-  el.localVideo.classList.remove("hidden");
-  el.localPlaceholder.classList.add("hidden");
+  // --------------------------------------------------------------
+  // LOCAL PREVIEW
+  // --------------------------------------------------------------
+
+  el.localVideo.srcObject =
+    localStream;
+
+  el.localVideo.classList.remove(
+    "hidden"
+  );
+
+  el.localPlaceholder.classList.add(
+    "hidden"
+  );
+
+  // --------------------------------------------------------------
+  // PEER CONNECTION
+  // --------------------------------------------------------------
 
   await ensurePeerConnection();
 
-  localStream.getTracks().forEach((track) => {
-    peerConnection.addTrack(track, localStream);
+  /*
+   * Pastikan semua track masuk ke PeerConnection.
+   */
+
+  const senders =
+    peerConnection.getSenders();
+
+  localStream
+    .getTracks()
+    .forEach((track) => {
+      const alreadyAdded =
+        senders.some(
+          (sender) =>
+            sender.track === track
+        );
+
+      if (!alreadyAdded) {
+        peerConnection.addTrack(
+          track,
+          localStream
+        );
+      }
+    });
+
+  // --------------------------------------------------------------
+  // OFFER
+  // --------------------------------------------------------------
+
+  const offer =
+    await peerConnection.createOffer();
+
+  await peerConnection.setLocalDescription(
+    offer
+  );
+
+  await sendSignal({
+    type: "webrtc-offer",
+    to: peerId,
+    offer,
   });
 
-  // Buat & kirim offer ke peer
-  const offer = await peerConnection.createOffer();
-  await peerConnection.setLocalDescription(offer);
-  socket.emit("webrtc-offer", { to: peerId, offer });
+  // --------------------------------------------------------------
+  // BROWSER STOP BUTTON
+  // --------------------------------------------------------------
 
-  // Jika user menghentikan share lewat tombol browser bawaan ("Stop sharing")
-  localStream.getVideoTracks()[0].addEventListener("ended", stopSharing);
+  const videoTrack =
+    localStream.getVideoTracks()[0];
+
+  if (videoTrack) {
+    videoTrack.addEventListener(
+      "ended",
+      () => {
+        stopSharing();
+      },
+      { once: true }
+    );
+  }
 
   isSharing = true;
+
   updateShareButtons();
-  socket.emit("sharing-status", { to: peerId, isSharing: true });
+
+  await sendSignal({
+    type: "sharing-status",
+    to: peerId,
+    isSharing: true,
+  });
 }
 
-function stopSharing() {
+// ================================================================
+// STOP SCREEN SHARING
+// ================================================================
+
+async function stopSharing() {
   if (localStream) {
-    localStream.getTracks().forEach((track) => track.stop());
+    localStream
+      .getTracks()
+      .forEach((track) => {
+        try {
+          track.stop();
+        } catch (err) {}
+      });
+
     localStream = null;
   }
+
   resetLocalVideo();
 
   isSharing = false;
+
   updateShareButtons();
 
   if (peerId) {
-    socket.emit("sharing-status", { to: peerId, isSharing: false });
+    await sendSignal({
+      type: "sharing-status",
+      to: peerId,
+      isSharing: false,
+    });
   }
 
-  // Tutup & bangun ulang koneksi supaya bersih untuk sesi share berikutnya
+  /*
+   * Tutup koneksi lama supaya sesi berikutnya bersih.
+   */
+
   cleanupPeerConnection();
 }
+
+// ================================================================
+// SHARE BUTTONS
+// ================================================================
 
 function updateShareButtons() {
-  el.btnStartShare.disabled = isSharing;
-  el.btnStopShare.disabled = !isSharing;
-  el.btnStartShare.classList.toggle("opacity-40", isSharing);
-  el.btnStopShare.classList.toggle("opacity-40", !isSharing);
+  el.btnStartShare.disabled =
+    isSharing;
+
+  el.btnStopShare.disabled =
+    !isSharing;
+
+  el.btnStartShare.classList.toggle(
+    "opacity-40",
+    isSharing
+  );
+
+  el.btnStopShare.classList.toggle(
+    "opacity-40",
+    !isSharing
+  );
 }
 
-// ------------------------------------------------------------------
+// ================================================================
 // LEAVE ROOM
-// ------------------------------------------------------------------
-el.btnLeaveRoom.addEventListener("click", () => {
-  if (localStream) {
-    localStream.getTracks().forEach((track) => track.stop());
-    localStream = null;
+// ================================================================
+
+el.btnLeaveRoom.addEventListener(
+  "click",
+  async () => {
+    try {
+      if (localStream) {
+        localStream
+          .getTracks()
+          .forEach((track) => {
+            try {
+              track.stop();
+            } catch (err) {}
+          });
+
+        localStream = null;
+      }
+
+      cleanupPeerConnection();
+
+      if (channel) {
+        try {
+          await channel.untrack();
+        } catch (err) {
+          console.warn(
+            "Gagal untrack:",
+            err
+          );
+        }
+
+        try {
+          await supabaseClient.removeChannel(
+            channel
+          );
+        } catch (err) {
+          console.warn(
+            "Gagal remove channel:",
+            err
+          );
+        }
+
+        channel = null;
+      }
+
+    } finally {
+      currentRoomCode = null;
+      currentPassword = null;
+
+      peerId = null;
+
+      isHost = false;
+      isSharing = false;
+
+      resetRemoteVideo();
+      resetLocalVideo();
+
+      updateShareButtons();
+
+      el.createdRoomInfo.classList.add(
+        "hidden"
+      );
+
+      el.createRoomCode.value = "";
+      el.createRoomPassword.value = "";
+
+      el.joinRoomCode.value = "";
+      el.joinRoomPassword.value = "";
+
+      goToEntryScreen();
+
+      setConnectionStatus(
+        "waiting"
+      );
+    }
   }
-  cleanupPeerConnection();
-  socket.emit("leave-room");
+);
 
-  currentRoomCode = null;
-  peerId = null;
-  isSharing = false;
+// ================================================================
+// PAGE CLOSE
+// ================================================================
 
-  resetRemoteVideo();
-  resetLocalVideo();
-  updateShareButtons();
-  el.createdRoomInfo.classList.add("hidden");
-  el.createRoomCode.value = "";
-  el.createRoomPassword.value = "";
-  el.joinRoomCode.value = "";
-  el.joinRoomPassword.value = "";
+window.addEventListener(
+  "beforeunload",
+  () => {
+    if (channel) {
+      channel.untrack();
+    }
+  }
+);
 
-  goToEntryScreen();
-});
+// ================================================================
+// INITIALIZATION
+// ================================================================
 
-// Inisialisasi awal
 updateShareButtons();
+
 switchTab("create");
+
+setConnectionStatus("waiting");
+
+console.log(
+  "✅ ScreenShare Supabase Realtime initialized."
+);
