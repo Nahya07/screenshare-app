@@ -1,14 +1,18 @@
 /**
  * app.js
- * Frontend P2P ScreenShare
+ * P2P ScreenShare menggunakan:
  *
- * Signaling:
- * - Supabase Realtime Broadcast
- * - Supabase Realtime Presence
+ * - Supabase Database:
+ *   Menyimpan room code + password
  *
- * Media:
- * - WebRTC P2P langsung antar-browser
- * - Screen/audio TIDAK dikirim melalui Supabase
+ * - Supabase Realtime:
+ *   Signaling WebRTC:
+ *   offer, answer, ICE candidate, status sharing
+ *
+ * - WebRTC:
+ *   Video/audio screen sharing langsung P2P
+ *
+ * Supabase TIDAK membawa video screen sharing.
  */
 
 // ================================================================
@@ -20,10 +24,11 @@ const SUPABASE_URL = "https://yoehxwgradptpvpgujlx.supabase.co";
 const SUPABASE_PUBLISHABLE_KEY =
   "sb_publishable_sZv6Aj53i98DPKDoMA3sTw_ZMGODu4a";
 
-const supabaseClient = window.supabase.createClient(
+const supabaseClient = supabase.createClient(
   SUPABASE_URL,
   SUPABASE_PUBLISHABLE_KEY
 );
+
 
 // ================================================================
 // WEBRTC CONFIG
@@ -34,40 +39,39 @@ const ICE_SERVERS = {
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
     { urls: "stun:stun2.l.google.com:19302" },
-    { urls: "stun:stun.services.mozilla.com" },
-  ],
+    { urls: "stun:stun.services.mozilla.com" }
+  ]
 };
+
 
 // ================================================================
 // GLOBAL STATE
 // ================================================================
 
 let currentRoomCode = null;
-let currentPassword = null;
-
 let selfId = crypto.randomUUID();
 let peerId = null;
 
-let channel = null;
+let roomChannel = null;
 let peerConnection = null;
 let localStream = null;
 
 let isSharing = false;
-let isHost = false;
+let isInRoom = false;
 
-// Untuk mencegah ICE candidate masuk sebelum remote description siap
-const pendingIceCandidates = [];
 
 // ================================================================
-// DOM REFERENCES
+// DOM
 // ================================================================
 
 const el = {
+
   screenEntry: document.getElementById("screen-entry"),
   screenRoom: document.getElementById("screen-room"),
 
   tabCreate: document.getElementById("tab-create"),
   tabJoin: document.getElementById("tab-join"),
+
   panelCreate: document.getElementById("panel-create"),
   panelJoin: document.getElementById("panel-join"),
 
@@ -75,110 +79,165 @@ const el = {
 
   createRoomCode: document.getElementById("create-room-code"),
   createRoomPassword: document.getElementById("create-room-password"),
+
   btnCreateRoom: document.getElementById("btn-create-room"),
 
-  createdRoomInfo: document.getElementById("created-room-info"),
-  displayRoomCode: document.getElementById("display-room-code"),
-  displayRoomPassword: document.getElementById("display-room-password"),
-  btnEnterCreatedRoom: document.getElementById("btn-enter-created-room"),
+  createdRoomInfo:
+    document.getElementById("created-room-info"),
 
-  joinRoomCode: document.getElementById("join-room-code"),
-  joinRoomPassword: document.getElementById("join-room-password"),
-  btnJoinRoom: document.getElementById("btn-join-room"),
+  displayRoomCode:
+    document.getElementById("display-room-code"),
 
-  entryError: document.getElementById("entry-error"),
+  displayRoomPassword:
+    document.getElementById("display-room-password"),
 
-  headerRoomCode: document.getElementById("header-room-code"),
-  statusDot: document.getElementById("status-dot"),
-  statusText: document.getElementById("status-text"),
-  btnLeaveRoom: document.getElementById("btn-leave-room"),
+  btnEnterCreatedRoom:
+    document.getElementById("btn-enter-created-room"),
 
-  remoteVideo: document.getElementById("remote-video"),
-  remotePlaceholder: document.getElementById("remote-placeholder"),
+  joinRoomCode:
+    document.getElementById("join-room-code"),
 
-  localVideo: document.getElementById("local-video"),
-  localPlaceholder: document.getElementById("local-placeholder"),
+  joinRoomPassword:
+    document.getElementById("join-room-password"),
 
-  btnStartShare: document.getElementById("btn-start-share"),
-  btnStopShare: document.getElementById("btn-stop-share"),
+  btnJoinRoom:
+    document.getElementById("btn-join-room"),
+
+  entryError:
+    document.getElementById("entry-error"),
+
+  headerRoomCode:
+    document.getElementById("header-room-code"),
+
+  statusDot:
+    document.getElementById("status-dot"),
+
+  statusText:
+    document.getElementById("status-text"),
+
+  btnLeaveRoom:
+    document.getElementById("btn-leave-room"),
+
+  remoteVideo:
+    document.getElementById("remote-video"),
+
+  remotePlaceholder:
+    document.getElementById("remote-placeholder"),
+
+  localVideo:
+    document.getElementById("local-video"),
+
+  localPlaceholder:
+    document.getElementById("local-placeholder"),
+
+  btnStartShare:
+    document.getElementById("btn-start-share"),
+
+  btnStopShare:
+    document.getElementById("btn-stop-share")
 };
+
 
 // ================================================================
 // UI HELPERS
 // ================================================================
 
 function showError(message) {
+
   el.entryError.textContent = message;
+
   el.entryError.classList.remove("hidden");
 }
 
+
 function clearError() {
-  el.entryError.classList.add("hidden");
+
   el.entryError.textContent = "";
+
+  el.entryError.classList.add("hidden");
 }
 
+
 function switchTab(tab) {
+
   clearError();
 
   if (tab === "create") {
-    el.tabCreate.classList.add("bg-indigo-600", "text-white");
-    el.tabCreate.classList.remove("text-slate-300");
 
-    el.tabJoin.classList.remove("bg-indigo-600", "text-white");
-    el.tabJoin.classList.add("text-slate-300");
+    el.tabCreate.classList.add(
+      "bg-indigo-600",
+      "text-white"
+    );
+
+    el.tabCreate.classList.remove(
+      "text-slate-300"
+    );
+
+    el.tabJoin.classList.remove(
+      "bg-indigo-600",
+      "text-white"
+    );
+
+    el.tabJoin.classList.add(
+      "text-slate-300"
+    );
 
     el.panelCreate.classList.remove("hidden");
     el.panelJoin.classList.add("hidden");
-  } else {
-    el.tabJoin.classList.add("bg-indigo-600", "text-white");
-    el.tabJoin.classList.remove("text-slate-300");
 
-    el.tabCreate.classList.remove("bg-indigo-600", "text-white");
-    el.tabCreate.classList.add("text-slate-300");
+  } else {
+
+    el.tabJoin.classList.add(
+      "bg-indigo-600",
+      "text-white"
+    );
+
+    el.tabJoin.classList.remove(
+      "text-slate-300"
+    );
+
+    el.tabCreate.classList.remove(
+      "bg-indigo-600",
+      "text-white"
+    );
+
+    el.tabCreate.classList.add(
+      "text-slate-300"
+    );
 
     el.panelJoin.classList.remove("hidden");
     el.panelCreate.classList.add("hidden");
   }
 }
 
-el.tabCreate.addEventListener("click", () => switchTab("create"));
-el.tabJoin.addEventListener("click", () => switchTab("join"));
-
-// ================================================================
-// CONNECTION STATUS
-// ================================================================
 
 function setConnectionStatus(status) {
+
   const map = {
+
     waiting: {
       color: "bg-yellow-400",
       text: "Menunggu peer bergabung...",
-      pulse: true,
+      pulse: true
     },
 
     connected: {
       color: "bg-emerald-400",
       text: "Connected",
-      pulse: false,
-    },
-
-    disconnecting: {
-      color: "bg-orange-400",
-      text: "Disconnecting...",
-      pulse: true,
+      pulse: false
     },
 
     reconnecting: {
       color: "bg-orange-400",
       text: "Reconnecting...",
-      pulse: true,
+      pulse: true
     },
 
     disconnected: {
       color: "bg-red-400",
       text: "Disconnected — peer keluar",
-      pulse: false,
-    },
+      pulse: false
+    }
   };
 
   const s = map[status] || map.waiting;
@@ -190,335 +249,81 @@ function setConnectionStatus(status) {
   el.statusText.textContent = s.text;
 }
 
+
 function goToRoomScreen(roomCode) {
+
   el.screenEntry.classList.add("hidden");
+
   el.screenRoom.classList.remove("hidden");
 
   el.headerRoomCode.textContent = roomCode;
 
-  setConnectionStatus(peerId ? "connected" : "waiting");
+  setConnectionStatus(
+    peerId ? "connected" : "waiting"
+  );
 }
 
+
 function goToEntryScreen() {
+
   el.screenRoom.classList.add("hidden");
+
   el.screenEntry.classList.remove("hidden");
 }
 
+
 // ================================================================
-// ROOM ID / PASSWORD
+// ROOM CODE GENERATOR
 // ================================================================
 
 function generateRoomCode() {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+  const chars =
+    "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
   let code = "";
 
   for (let i = 0; i < 6; i++) {
-    code += chars[Math.floor(Math.random() * chars.length)];
+
+    code += chars[
+      Math.floor(Math.random() * chars.length)
+    ];
   }
 
   return code;
 }
 
+
 function generatePassword() {
+
   const chars =
     "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
 
   let password = "";
 
   for (let i = 0; i < 6; i++) {
-    password += chars[Math.floor(Math.random() * chars.length)];
+
+    password += chars[
+      Math.floor(Math.random() * chars.length)
+    ];
   }
 
   return password;
 }
 
-// ================================================================
-// SUPABASE CHANNEL
-// ================================================================
-
-async function createRoomChannel(roomCode) {
-  if (channel) {
-    try {
-      await supabaseClient.removeChannel(channel);
-    } catch (err) {
-      console.warn("Gagal menghapus channel lama:", err);
-    }
-
-    channel = null;
-  }
-
-  channel = supabaseClient.channel(`screenshare:${roomCode}`, {
-    config: {
-      presence: {
-        key: selfId,
-      },
-    },
-  });
-
-  // --------------------------------------------------------------
-  // PRESENCE
-  // --------------------------------------------------------------
-
-  channel.on("presence", { event: "sync" }, () => {
-    handlePresenceSync();
-  });
-
-  channel.on("presence", { event: "join" }, ({ key, newPresences }) => {
-    console.log("Peer join:", key, newPresences);
-
-    if (key !== selfId) {
-      peerId = key;
-
-      setConnectionStatus("connected");
-
-      // Host memberi tahu peer baru bahwa dia siap.
-      if (isHost) {
-        sendSignal({
-          type: "peer-ready",
-        });
-      }
-    }
-  });
-
-  channel.on("presence", { event: "leave" }, ({ key }) => {
-    console.log("Peer leave:", key);
-
-    if (key === peerId) {
-      peerId = null;
-
-      cleanupPeerConnection();
-      resetRemoteVideo();
-
-      setConnectionStatus("disconnected");
-    }
-  });
-
-  // --------------------------------------------------------------
-  // BROADCAST SIGNALING
-  // --------------------------------------------------------------
-
-  channel.on(
-    "broadcast",
-    { event: "signal" },
-    async ({ payload }) => {
-      await handleSignal(payload);
-    }
-  );
-
-  const status = await channel.subscribe(async (status) => {
-    console.log("Supabase channel status:", status);
-
-    if (status === "SUBSCRIBED") {
-      await channel.track({
-        id: selfId,
-        name: el.inputName.value.trim() || "Anonim",
-        joinedAt: Date.now(),
-      });
-
-      console.log("Supabase Realtime connected.");
-    }
-  });
-
-  if (status !== "ok") {
-    throw new Error("Gagal terhubung ke Supabase Realtime.");
-  }
-}
 
 // ================================================================
-// PRESENCE
+// CREATE ROOM
 // ================================================================
 
-function handlePresenceSync() {
-  if (!channel) return;
+el.btnCreateRoom.addEventListener(
+  "click",
+  createRoom
+);
 
-  const state = channel.presenceState();
 
-  const peerKeys = Object.keys(state).filter(
-    (key) => key !== selfId
-  );
+async function createRoom() {
 
-  console.log("Presence state:", state);
-
-  if (peerKeys.length > 0) {
-    if (peerKeys.length > 1) {
-      console.warn("Room memiliki lebih dari 2 peserta.");
-    }
-
-    peerId = peerKeys[0];
-
-    setConnectionStatus("connected");
-
-    // Host memberi tahu peer bahwa dia siap.
-    if (isHost) {
-      sendSignal({
-        type: "peer-ready",
-      });
-    }
-  } else {
-    peerId = null;
-    setConnectionStatus("waiting");
-  }
-}
-
-// ================================================================
-// BROADCAST SIGNAL
-// ================================================================
-
-async function sendSignal(payload) {
-  if (!channel) {
-    console.warn("Channel belum tersedia.");
-    return;
-  }
-
-  try {
-    await channel.send({
-      type: "broadcast",
-      event: "signal",
-      payload: {
-        ...payload,
-        from: selfId,
-      },
-    });
-  } catch (err) {
-    console.error("Gagal mengirim signaling:", err);
-  }
-}
-
-// ================================================================
-// SIGNAL HANDLER
-// ================================================================
-
-async function handleSignal(payload) {
-  if (!payload) return;
-
-  // Abaikan pesan sendiri
-  if (payload.from === selfId) return;
-
-  console.log("Signal received:", payload.type);
-
-  // --------------------------------------------------------------
-  // PEER READY
-  // --------------------------------------------------------------
-
-  if (payload.type === "peer-ready") {
-    peerId = payload.from;
-
-    setConnectionStatus("connected");
-
-    // Host yang membuat room bertanggung jawab membuat offer
-    // ketika sudah ada peer.
-    if (isHost && !isSharing) {
-      console.log("Peer siap.");
-    }
-
-    return;
-  }
-
-  // --------------------------------------------------------------
-  // START SHARING REQUEST
-  // --------------------------------------------------------------
-
-  if (payload.type === "sharing-status") {
-    if (!payload.isSharing) {
-      resetRemoteVideo();
-    }
-
-    return;
-  }
-
-  // --------------------------------------------------------------
-  // WEBRTC OFFER
-  // --------------------------------------------------------------
-
-  if (payload.type === "webrtc-offer") {
-    peerId = payload.from;
-
-    try {
-      await ensurePeerConnection();
-
-      await peerConnection.setRemoteDescription(
-        new RTCSessionDescription(payload.offer)
-      );
-
-      await flushPendingIceCandidates();
-
-      const answer = await peerConnection.createAnswer();
-
-      await peerConnection.setLocalDescription(answer);
-
-      await sendSignal({
-        type: "webrtc-answer",
-        to: payload.from,
-        answer,
-      });
-    } catch (err) {
-      console.error("Gagal menangani offer:", err);
-    }
-
-    return;
-  }
-
-  // --------------------------------------------------------------
-  // WEBRTC ANSWER
-  // --------------------------------------------------------------
-
-  if (payload.type === "webrtc-answer") {
-    if (!peerConnection) return;
-
-    try {
-      await peerConnection.setRemoteDescription(
-        new RTCSessionDescription(payload.answer)
-      );
-
-      await flushPendingIceCandidates();
-    } catch (err) {
-      console.error("Gagal menangani answer:", err);
-    }
-
-    return;
-  }
-
-  // --------------------------------------------------------------
-  // ICE CANDIDATE
-  // --------------------------------------------------------------
-
-  if (payload.type === "webrtc-ice-candidate") {
-    if (!payload.candidate) return;
-
-    const candidate = new RTCIceCandidate(payload.candidate);
-
-    if (
-      peerConnection &&
-      peerConnection.remoteDescription
-    ) {
-      try {
-        await peerConnection.addIceCandidate(candidate);
-      } catch (err) {
-        console.warn("Gagal add ICE candidate:", err);
-      }
-    } else {
-      pendingIceCandidates.push(candidate);
-    }
-
-    return;
-  }
-
-  // --------------------------------------------------------------
-  // RECONNECT SIGNAL
-  // --------------------------------------------------------------
-
-  if (payload.type === "reconnect-signal") {
-    setConnectionStatus("reconnecting");
-    return;
-  }
-}
-
-// ================================================================
-// ROOM CREATION
-// ================================================================
-
-el.btnCreateRoom.addEventListener("click", async () => {
   clearError();
 
   const name =
@@ -531,351 +336,851 @@ el.btnCreateRoom.addEventListener("click", async () => {
     el.createRoomPassword.value.trim();
 
   if (!roomCode) {
+
     roomCode = generateRoomCode();
   }
 
   if (!password) {
+
     password = generatePassword();
   }
 
   el.btnCreateRoom.disabled = true;
-  el.btnCreateRoom.textContent = "Membuat room...";
+
+  el.btnCreateRoom.textContent =
+    "Membuat room...";
 
   try {
-    /*
-     * Kita tidak menggunakan database untuk room.
-     * Room dibuat berdasarkan channel Realtime.
-     *
-     * Password tetap ditampilkan kepada host.
-     */
 
-    currentRoomCode = roomCode;
-    currentPassword = password;
+    // Cek apakah kode sudah ada
 
-    isHost = true;
+    const { data: existingRoom, error: checkError } =
+      await supabaseClient
+        .from("rooms")
+        .select("room_code")
+        .eq("room_code", roomCode)
+        .maybeSingle();
 
-    el.displayRoomCode.textContent = roomCode;
-    el.displayRoomPassword.textContent = password;
+    if (checkError) {
 
-    el.createdRoomInfo.classList.remove("hidden");
+      console.error(checkError);
 
-    el.btnEnterCreatedRoom.dataset.roomCode = roomCode;
-    el.btnEnterCreatedRoom.dataset.password = password;
+      throw new Error(
+        "Gagal menghubungi database Supabase."
+      );
+    }
 
-    console.log("Room dibuat:", roomCode);
+    if (existingRoom) {
 
-  } catch (err) {
-    console.error(err);
-    showError("Gagal membuat room.");
+      throw new Error(
+        "Kode room sudah digunakan. Gunakan kode lain."
+      );
+    }
+
+
+    // Buat room
+
+    const { error } =
+      await supabaseClient
+        .from("rooms")
+        .insert({
+
+          room_code: roomCode,
+
+          password: password,
+
+          created_at: new Date().toISOString()
+        });
+
+    if (error) {
+
+      console.error(error);
+
+      throw new Error(
+        "Gagal membuat room: " +
+        error.message
+      );
+    }
+
+
+    // Tampilkan informasi room
+
+    el.displayRoomCode.textContent =
+      roomCode;
+
+    el.displayRoomPassword.textContent =
+      password;
+
+    el.createdRoomInfo.classList.remove(
+      "hidden"
+    );
+
+
+    el.btnEnterCreatedRoom.dataset.roomCode =
+      roomCode;
+
+    el.btnEnterCreatedRoom.dataset.password =
+      password;
+
+    console.log(
+      `Room ${roomCode} berhasil dibuat oleh ${name}`
+    );
+
+  } catch (error) {
+
+    console.error(error);
+
+    showError(
+      error.message ||
+      "Gagal membuat room."
+    );
+
   } finally {
+
     el.btnCreateRoom.disabled = false;
-    el.btnCreateRoom.textContent = "Buat Room Baru";
+
+    el.btnCreateRoom.textContent =
+      "Buat Room Baru";
   }
-});
+}
+
 
 // ================================================================
 // ENTER CREATED ROOM
 // ================================================================
 
-el.btnEnterCreatedRoom.addEventListener("click", async () => {
-  const roomCode =
-    el.btnEnterCreatedRoom.dataset.roomCode;
+el.btnEnterCreatedRoom.addEventListener(
+  "click",
+  () => {
 
-  const password =
-    el.btnEnterCreatedRoom.dataset.password;
+    const roomCode =
+      el.btnEnterCreatedRoom.dataset.roomCode;
 
-  const name =
-    el.inputName.value.trim() || "Anonim";
+    const password =
+      el.btnEnterCreatedRoom.dataset.password;
 
-  await doJoinRoom(roomCode, password, name, true);
-});
+    const name =
+      el.inputName.value.trim() || "Anonim";
+
+    doJoinRoom(
+      roomCode,
+      password,
+      name
+    );
+  }
+);
+
+
+// ================================================================
+// JOIN ROOM BUTTON
+// ================================================================
+
+el.btnJoinRoom.addEventListener(
+  "click",
+  () => {
+
+    clearError();
+
+    const name =
+      el.inputName.value.trim() || "Anonim";
+
+    const roomCode =
+      el.joinRoomCode.value
+        .trim()
+        .toUpperCase();
+
+    const password =
+      el.joinRoomPassword.value.trim();
+
+    if (!roomCode || !password) {
+
+      showError(
+        "Kode room dan password wajib diisi."
+      );
+
+      return;
+    }
+
+    doJoinRoom(
+      roomCode,
+      password,
+      name
+    );
+  }
+);
+
 
 // ================================================================
 // JOIN ROOM
 // ================================================================
 
-el.btnJoinRoom.addEventListener("click", async () => {
-  clearError();
-
-  const name =
-    el.inputName.value.trim() || "Anonim";
-
-  const roomCode =
-    el.joinRoomCode.value.trim().toUpperCase();
-
-  const password =
-    el.joinRoomPassword.value.trim();
-
-  if (!roomCode || !password) {
-    showError("Kode room dan password wajib diisi.");
-    return;
-  }
-
-  await doJoinRoom(roomCode, password, name, false);
-});
-
-// ================================================================
-// JOIN ROOM FUNCTION
-// ================================================================
-
 async function doJoinRoom(
   roomCode,
   password,
-  name,
-  host
+  name
 ) {
+
   clearError();
 
-  if (!roomCode) {
-    showError("Kode room tidak boleh kosong.");
-    return;
-  }
+  el.btnJoinRoom.disabled = true;
 
   try {
-    currentRoomCode = roomCode.toUpperCase();
-    currentPassword = password;
-    isHost = !!host;
 
-    /*
-     * Karena tidak ada server pusat yang menyimpan room,
-     * password digunakan sebagai bagian dari validasi channel.
-     *
-     * Kita membuat nama channel berdasarkan room + hash password.
-     */
+    // Ambil room dari Supabase
 
-    const channelRoomName =
-      await createSecureChannelName(
-        currentRoomCode,
-        currentPassword
+    const { data: room, error } =
+      await supabaseClient
+        .from("rooms")
+        .select("*")
+        .eq("room_code", roomCode)
+        .maybeSingle();
+
+    if (error) {
+
+      console.error(error);
+
+      throw new Error(
+        "Gagal menghubungi database."
       );
+    }
 
-    await createRoomChannel(channelRoomName);
+    if (!room) {
 
-    goToRoomScreen(currentRoomCode);
+      throw new Error(
+        "Room tidak ditemukan. Periksa kembali kode room."
+      );
+    }
 
-    console.log(
-      `Berhasil masuk room ${currentRoomCode}`
+
+    // Validasi password
+
+    if (room.password !== password) {
+
+      throw new Error(
+        "Password salah."
+      );
+    }
+
+
+    // Masuk room
+
+    currentRoomCode = roomCode;
+
+    isInRoom = true;
+
+    peerId = null;
+
+    await connectToRoomChannel(
+      roomCode,
+      name
     );
 
-  } catch (err) {
-    console.error("Join room error:", err);
+    goToRoomScreen(
+      roomCode
+    );
+
+  } catch (error) {
+
+    console.error(error);
 
     showError(
-      err.message ||
+      error.message ||
       "Gagal bergabung ke room."
     );
 
-    currentRoomCode = null;
-    currentPassword = null;
-    isHost = false;
+  } finally {
+
+    el.btnJoinRoom.disabled = false;
   }
 }
 
+
 // ================================================================
-// CREATE SECURE CHANNEL NAME
+// SUPABASE REALTIME ROOM
 // ================================================================
 
-async function createSecureChannelName(
+async function connectToRoomChannel(
   roomCode,
-  password
+  name
 ) {
-  const encoder =
-    new TextEncoder();
 
-  const data =
-    encoder.encode(
-      `${roomCode}:${password}`
+  // Jika masih ada channel lama
+
+  if (roomChannel) {
+
+    await supabaseClient
+      .removeChannel(roomChannel);
+
+    roomChannel = null;
+  }
+
+
+  roomChannel =
+    supabaseClient.channel(
+      `screenshare-${roomCode}`,
+      {
+
+        config: {
+
+          broadcast: {
+            self: false
+          },
+
+          presence: {
+            key: selfId
+          }
+        }
+      }
     );
 
-  const hashBuffer =
-    await crypto.subtle.digest(
-      "SHA-256",
-      data
+
+  // ============================================================
+  // PRESENCE
+  // ============================================================
+
+  roomChannel.on(
+    "presence",
+    {
+      event: "sync"
+    },
+    () => {
+
+      const state =
+        roomChannel.presenceState();
+
+      const peers = [];
+
+      Object.keys(state).forEach(
+        (key) => {
+
+          if (key !== selfId) {
+
+            const users =
+              state[key];
+
+            if (
+              users &&
+              users.length > 0
+            ) {
+
+              peers.push({
+                id: key,
+                name:
+                  users[0].name ||
+                  "Anonim"
+              });
+            }
+          }
+        }
+      );
+
+
+      if (peers.length > 0) {
+
+        peerId =
+          peers[0].id;
+
+        setConnectionStatus(
+          "connected"
+        );
+
+        console.log(
+          "Peer ditemukan:",
+          peers[0]
+        );
+
+      } else {
+
+        peerId = null;
+
+        setConnectionStatus(
+          "waiting"
+        );
+      }
+    }
+  );
+
+
+  // ============================================================
+  // WEBRTC OFFER
+  // ============================================================
+
+  roomChannel.on(
+    "broadcast",
+    {
+      event: "webrtc-offer"
+    },
+    async ({ payload }) => {
+
+      if (
+        payload.from === selfId
+      ) {
+        return;
+      }
+
+      console.log(
+        "Menerima WebRTC offer"
+      );
+
+      peerId =
+        payload.from;
+
+      await ensurePeerConnection();
+
+      await peerConnection
+        .setRemoteDescription(
+          new RTCSessionDescription(
+            payload.offer
+          )
+        );
+
+      const answer =
+        await peerConnection.createAnswer();
+
+      await peerConnection
+        .setLocalDescription(
+          answer
+        );
+
+      await sendSignal(
+        "webrtc-answer",
+        {
+          from: selfId,
+
+          to: payload.from,
+
+          answer
+        }
+      );
+    }
+  );
+
+
+  // ============================================================
+  // WEBRTC ANSWER
+  // ============================================================
+
+  roomChannel.on(
+    "broadcast",
+    {
+      event: "webrtc-answer"
+    },
+    async ({ payload }) => {
+
+      if (
+        payload.to !== selfId
+      ) {
+        return;
+      }
+
+      console.log(
+        "Menerima WebRTC answer"
+      );
+
+      if (!peerConnection) {
+        return;
+      }
+
+      await peerConnection
+        .setRemoteDescription(
+          new RTCSessionDescription(
+            payload.answer
+          )
+        );
+    }
+  );
+
+
+  // ============================================================
+  // ICE CANDIDATE
+  // ============================================================
+
+  roomChannel.on(
+    "broadcast",
+    {
+      event: "webrtc-ice-candidate"
+    },
+    async ({ payload }) => {
+
+      if (
+        payload.to !== selfId
+      ) {
+        return;
+      }
+
+      if (
+        !peerConnection ||
+        !payload.candidate
+      ) {
+        return;
+      }
+
+      try {
+
+        await peerConnection
+          .addIceCandidate(
+            new RTCIceCandidate(
+              payload.candidate
+            )
+          );
+
+      } catch (error) {
+
+        console.warn(
+          "Gagal menambahkan ICE candidate:",
+          error
+        );
+      }
+    }
+  );
+
+
+  // ============================================================
+  // SHARING STATUS
+  // ============================================================
+
+  roomChannel.on(
+    "broadcast",
+    {
+      event: "sharing-status"
+    },
+    ({ payload }) => {
+
+      if (
+        payload.to !== selfId
+      ) {
+        return;
+      }
+
+      if (
+        !payload.isSharing
+      ) {
+
+        resetRemoteVideo();
+      }
+    }
+  );
+
+
+  // ============================================================
+  // RECONNECT SIGNAL
+  // ============================================================
+
+  roomChannel.on(
+    "broadcast",
+    {
+      event: "reconnect-signal"
+    },
+    ({ payload }) => {
+
+      if (
+        payload.to !== selfId
+      ) {
+        return;
+      }
+
+      setConnectionStatus(
+        "reconnecting"
+      );
+    }
+  );
+
+
+  // ============================================================
+  // SUBSCRIBE
+  // ============================================================
+
+  const status =
+    await new Promise(
+      (resolve, reject) => {
+
+        roomChannel.subscribe(
+          async (status) => {
+
+            console.log(
+              "Supabase channel:",
+              status
+            );
+
+            if (
+              status === "SUBSCRIBED"
+            ) {
+
+              // Masukkan diri ke Presence
+
+              await roomChannel.track({
+
+                id: selfId,
+
+                name: name,
+
+                joinedAt:
+                  new Date().toISOString()
+              });
+
+              resolve(status);
+
+            } else if (
+              status === "CHANNEL_ERROR"
+            ) {
+
+              reject(
+                new Error(
+                  "Gagal terhubung ke Supabase Realtime."
+                )
+              );
+
+            } else if (
+              status === "TIMED_OUT"
+            ) {
+
+              reject(
+                new Error(
+                  "Koneksi Supabase timeout."
+                )
+              );
+            }
+          }
+        );
+      }
     );
 
-  const hashArray =
-    Array.from(
-      new Uint8Array(hashBuffer)
-    );
 
-  const hash =
-    hashArray
-      .map((b) =>
-        b.toString(16).padStart(2, "0")
-      )
-      .join("");
-
-  return `${roomCode}-${hash.substring(0, 16)}`;
+  return status;
 }
+
+
+// ================================================================
+// SEND SIGNAL
+// ================================================================
+
+async function sendSignal(
+  event,
+  payload
+) {
+
+  if (!roomChannel) {
+
+    console.warn(
+      "Room channel belum tersedia."
+    );
+
+    return;
+  }
+
+  await roomChannel.send({
+
+    type: "broadcast",
+
+    event: event,
+
+    payload: payload
+  });
+}
+
 
 // ================================================================
 // WEBRTC PEER CONNECTION
 // ================================================================
 
 async function ensurePeerConnection() {
+
   if (peerConnection) {
+
     return peerConnection;
   }
+
 
   peerConnection =
     new RTCPeerConnection(
       ICE_SERVERS
     );
 
-  // --------------------------------------------------------------
+
+  // ============================================================
   // ICE
-  // --------------------------------------------------------------
+  // ============================================================
 
   peerConnection.onicecandidate =
     async (event) => {
-      if (!event.candidate || !peerId) {
+
+      if (
+        !event.candidate ||
+        !peerId
+      ) {
         return;
       }
 
-      await sendSignal({
-        type: "webrtc-ice-candidate",
-        to: peerId,
-        candidate: event.candidate,
-      });
+      await sendSignal(
+        "webrtc-ice-candidate",
+        {
+
+          from: selfId,
+
+          to: peerId,
+
+          candidate:
+            event.candidate
+        }
+      );
     };
 
-  // --------------------------------------------------------------
+
+  // ============================================================
   // REMOTE TRACK
-  // --------------------------------------------------------------
+  // ============================================================
 
   peerConnection.ontrack =
     (event) => {
-      console.log("Remote track diterima.");
 
-      if (event.streams && event.streams[0]) {
+      console.log(
+        "Remote track diterima."
+      );
+
+      if (
+        event.streams &&
+        event.streams[0]
+      ) {
+
         el.remoteVideo.srcObject =
           event.streams[0];
 
-        el.remoteVideo.classList.remove(
-          "hidden"
-        );
+      } else {
 
-        el.remotePlaceholder.classList.add(
-          "hidden"
+        if (
+          !el.remoteVideo.srcObject
+        ) {
+
+          el.remoteVideo.srcObject =
+            new MediaStream();
+        }
+
+        el.remoteVideo.srcObject.addTrack(
+          event.track
         );
       }
+
+      el.remoteVideo.classList.remove(
+        "hidden"
+      );
+
+      el.remotePlaceholder.classList.add(
+        "hidden"
+      );
     };
 
-  // --------------------------------------------------------------
+
+  // ============================================================
   // CONNECTION STATE
-  // --------------------------------------------------------------
+  // ============================================================
 
   peerConnection.onconnectionstatechange =
     () => {
-      if (!peerConnection) return;
 
       const state =
         peerConnection.connectionState;
 
       console.log(
-        "PeerConnection state:",
+        "WebRTC state:",
         state
       );
 
-      if (state === "connected") {
-        setConnectionStatus("connected");
-      }
-
-      if (state === "disconnected") {
-        setConnectionStatus("reconnecting");
-      }
-
       if (
-        state === "failed" ||
-        state === "closed"
+        state === "connected"
       ) {
+
+        setConnectionStatus(
+          "connected"
+        );
+
+      } else if (
+        state === "connecting"
+      ) {
+
+        setConnectionStatus(
+          "waiting"
+        );
+
+      } else if (
+        state === "disconnected"
+      ) {
+
+        setConnectionStatus(
+          "reconnecting"
+        );
+
+      } else if (
+        state === "failed"
+      ) {
+
         setConnectionStatus(
           "disconnected"
         );
 
         resetRemoteVideo();
+
+      } else if (
+        state === "closed"
+      ) {
+
+        setConnectionStatus(
+          "disconnected"
+        );
       }
     };
 
-  // --------------------------------------------------------------
-  // LOCAL TRACK
-  // --------------------------------------------------------------
+
+  // ============================================================
+  // ADD EXISTING LOCAL STREAM
+  // ============================================================
 
   if (localStream) {
+
     localStream
       .getTracks()
-      .forEach((track) => {
-        peerConnection.addTrack(
-          track,
-          localStream
-        );
-      });
+      .forEach(
+        (track) => {
+
+          peerConnection.addTrack(
+            track,
+            localStream
+          );
+        }
+      );
   }
+
 
   return peerConnection;
 }
 
-// ================================================================
-// FLUSH ICE CANDIDATES
-// ================================================================
-
-async function flushPendingIceCandidates() {
-  if (
-    !peerConnection ||
-    !peerConnection.remoteDescription
-  ) {
-    return;
-  }
-
-  while (
-    pendingIceCandidates.length > 0
-  ) {
-    const candidate =
-      pendingIceCandidates.shift();
-
-    try {
-      await peerConnection.addIceCandidate(
-        candidate
-      );
-    } catch (err) {
-      console.warn(
-        "Gagal menambahkan queued ICE candidate:",
-        err
-      );
-    }
-  }
-}
 
 // ================================================================
-// CLEANUP PEER CONNECTION
+// CLEANUP WEBRTC
 // ================================================================
 
 function cleanupPeerConnection() {
-  if (peerConnection) {
-    try {
-      peerConnection.onicecandidate = null;
-      peerConnection.ontrack = null;
 
-      peerConnection.close();
-    } catch (err) {
-      console.warn(
-        "Cleanup peer error:",
-        err
-      );
-    }
+  if (peerConnection) {
+
+    peerConnection.ontrack = null;
+
+    peerConnection.onicecandidate = null;
+
+    peerConnection.close();
 
     peerConnection = null;
   }
-
-  pendingIceCandidates.length = 0;
 }
 
+
 // ================================================================
-// REMOTE VIDEO
+// REMOTE VIDEO RESET
 // ================================================================
 
 function resetRemoteVideo() {
-  el.remoteVideo.srcObject = null;
+
+  el.remoteVideo.srcObject =
+    null;
 
   el.remoteVideo.classList.add(
     "hidden"
@@ -886,12 +1191,15 @@ function resetRemoteVideo() {
   );
 }
 
+
 // ================================================================
-// LOCAL VIDEO
+// LOCAL VIDEO RESET
 // ================================================================
 
 function resetLocalVideo() {
-  el.localVideo.srcObject = null;
+
+  el.localVideo.srcObject =
+    null;
 
   el.localVideo.classList.add(
     "hidden"
@@ -902,6 +1210,7 @@ function resetLocalVideo() {
   );
 }
 
+
 // ================================================================
 // START SCREEN SHARING
 // ================================================================
@@ -911,13 +1220,11 @@ el.btnStartShare.addEventListener(
   startSharing
 );
 
-el.btnStopShare.addEventListener(
-  "click",
-  stopSharing
-);
 
 async function startSharing() {
+
   if (!peerId) {
+
     alert(
       "Tunggu hingga peer lain bergabung ke room terlebih dahulu."
     );
@@ -925,37 +1232,49 @@ async function startSharing() {
     return;
   }
 
+
+  if (isSharing) {
+
+    return;
+  }
+
+
   try {
+
     localStream =
-      await navigator.mediaDevices.getDisplayMedia(
-        {
-          video: {
-            frameRate: {
-              ideal: 30,
-              max: 60,
-            },
-          },
+      await navigator.mediaDevices.getDisplayMedia({
 
-          audio: true,
-        }
-      );
+        video: {
 
-  } catch (err) {
+          frameRate: {
+
+            ideal: 30,
+
+            max: 60
+          }
+        },
+
+        audio: true
+      });
+
+  } catch (error) {
+
     console.error(
       "Gagal mengambil layar:",
-      err
+      error
     );
 
     alert(
-      "Tidak bisa memulai screen sharing. Pastikan izin screen sharing diberikan."
+      "Tidak bisa memulai screen sharing. Pastikan izin layar diberikan."
     );
 
     return;
   }
 
-  // --------------------------------------------------------------
+
+  // ============================================================
   // LOCAL PREVIEW
-  // --------------------------------------------------------------
+  // ============================================================
 
   el.localVideo.srcObject =
     localStream;
@@ -968,124 +1287,166 @@ async function startSharing() {
     "hidden"
   );
 
-  // --------------------------------------------------------------
-  // PEER CONNECTION
-  // --------------------------------------------------------------
+
+  // ============================================================
+  // CREATE PEER CONNECTION
+  // ============================================================
+
+  cleanupPeerConnection();
 
   await ensurePeerConnection();
 
-  /*
-   * Pastikan semua track masuk ke PeerConnection.
-   */
 
-  const senders =
-    peerConnection.getSenders();
+  // ============================================================
+  // ADD TRACKS
+  // ============================================================
 
   localStream
     .getTracks()
-    .forEach((track) => {
-      const alreadyAdded =
-        senders.some(
-          (sender) =>
-            sender.track === track
-        );
+    .forEach(
+      (track) => {
 
-      if (!alreadyAdded) {
         peerConnection.addTrack(
           track,
           localStream
         );
       }
-    });
+    );
 
-  // --------------------------------------------------------------
-  // OFFER
-  // --------------------------------------------------------------
+
+  // ============================================================
+  // CREATE OFFER
+  // ============================================================
 
   const offer =
     await peerConnection.createOffer();
 
-  await peerConnection.setLocalDescription(
-    offer
+
+  await peerConnection
+    .setLocalDescription(
+      offer
+    );
+
+
+  // ============================================================
+  // SEND OFFER VIA SUPABASE
+  // ============================================================
+
+  await sendSignal(
+    "webrtc-offer",
+    {
+
+      from: selfId,
+
+      to: peerId,
+
+      offer
+    }
   );
 
-  await sendSignal({
-    type: "webrtc-offer",
-    to: peerId,
-    offer,
-  });
 
-  // --------------------------------------------------------------
-  // BROWSER STOP BUTTON
-  // --------------------------------------------------------------
-
-  const videoTrack =
-    localStream.getVideoTracks()[0];
-
-  if (videoTrack) {
-    videoTrack.addEventListener(
-      "ended",
-      () => {
-        stopSharing();
-      },
-      { once: true }
-    );
-  }
+  // ============================================================
+  // SHARING STATUS
+  // ============================================================
 
   isSharing = true;
 
   updateShareButtons();
 
-  await sendSignal({
-    type: "sharing-status",
-    to: peerId,
-    isSharing: true,
-  });
+
+  await sendSignal(
+    "sharing-status",
+    {
+
+      from: selfId,
+
+      to: peerId,
+
+      isSharing: true
+    }
+  );
+
+
+  // ============================================================
+  // BROWSER STOP SHARING
+  // ============================================================
+
+  const videoTrack =
+    localStream.getVideoTracks()[0];
+
+  if (videoTrack) {
+
+    videoTrack.addEventListener(
+      "ended",
+      () => {
+
+        stopSharing();
+      },
+      {
+        once: true
+      }
+    );
+  }
 }
+
 
 // ================================================================
 // STOP SCREEN SHARING
 // ================================================================
 
 async function stopSharing() {
-  if (localStream) {
+
+  if (
+    localStream
+  ) {
+
     localStream
       .getTracks()
-      .forEach((track) => {
-        try {
+      .forEach(
+        (track) => {
+
           track.stop();
-        } catch (err) {}
-      });
+        }
+      );
 
     localStream = null;
   }
 
+
   resetLocalVideo();
+
 
   isSharing = false;
 
   updateShareButtons();
 
+
   if (peerId) {
-    await sendSignal({
-      type: "sharing-status",
-      to: peerId,
-      isSharing: false,
-    });
+
+    await sendSignal(
+      "sharing-status",
+      {
+
+        from: selfId,
+
+        to: peerId,
+
+        isSharing: false
+      }
+    );
   }
 
-  /*
-   * Tutup koneksi lama supaya sesi berikutnya bersih.
-   */
 
   cleanupPeerConnection();
 }
 
+
 // ================================================================
-// SHARE BUTTONS
+// SHARE BUTTON UI
 // ================================================================
 
 function updateShareButtons() {
+
   el.btnStartShare.disabled =
     isSharing;
 
@@ -1103,97 +1464,151 @@ function updateShareButtons() {
   );
 }
 
+
 // ================================================================
 // LEAVE ROOM
 // ================================================================
 
 el.btnLeaveRoom.addEventListener(
   "click",
-  async () => {
-    try {
-      if (localStream) {
-        localStream
-          .getTracks()
-          .forEach((track) => {
-            try {
-              track.stop();
-            } catch (err) {}
-          });
-
-        localStream = null;
-      }
-
-      cleanupPeerConnection();
-
-      if (channel) {
-        try {
-          await channel.untrack();
-        } catch (err) {
-          console.warn(
-            "Gagal untrack:",
-            err
-          );
-        }
-
-        try {
-          await supabaseClient.removeChannel(
-            channel
-          );
-        } catch (err) {
-          console.warn(
-            "Gagal remove channel:",
-            err
-          );
-        }
-
-        channel = null;
-      }
-
-    } finally {
-      currentRoomCode = null;
-      currentPassword = null;
-
-      peerId = null;
-
-      isHost = false;
-      isSharing = false;
-
-      resetRemoteVideo();
-      resetLocalVideo();
-
-      updateShareButtons();
-
-      el.createdRoomInfo.classList.add(
-        "hidden"
-      );
-
-      el.createRoomCode.value = "";
-      el.createRoomPassword.value = "";
-
-      el.joinRoomCode.value = "";
-      el.joinRoomPassword.value = "";
-
-      goToEntryScreen();
-
-      setConnectionStatus(
-        "waiting"
-      );
-    }
-  }
+  leaveRoom
 );
 
+
+async function leaveRoom() {
+
+  try {
+
+    // Stop local stream
+
+    if (localStream) {
+
+      localStream
+        .getTracks()
+        .forEach(
+          (track) => {
+
+            track.stop();
+          }
+        );
+
+      localStream = null;
+    }
+
+
+    // Close WebRTC
+
+    cleanupPeerConnection();
+
+
+    // Remove presence + channel
+
+    if (roomChannel) {
+
+      try {
+
+        await roomChannel.untrack();
+
+      } catch (error) {
+
+        console.warn(
+          "Gagal untrack presence:",
+          error
+        );
+      }
+
+
+      await supabaseClient
+        .removeChannel(
+          roomChannel
+        );
+
+      roomChannel = null;
+    }
+
+
+  } catch (error) {
+
+    console.error(
+      "Leave room error:",
+      error
+    );
+  }
+
+
+  // Reset state
+
+  currentRoomCode = null;
+
+  peerId = null;
+
+  isInRoom = false;
+
+  isSharing = false;
+
+
+  resetRemoteVideo();
+
+  resetLocalVideo();
+
+  updateShareButtons();
+
+
+  // Reset form
+
+  el.createdRoomInfo.classList.add(
+    "hidden"
+  );
+
+  el.createRoomCode.value =
+    "";
+
+  el.createRoomPassword.value =
+    "";
+
+  el.joinRoomCode.value =
+    "";
+
+  el.joinRoomPassword.value =
+    "";
+
+
+  setConnectionStatus(
+    "waiting"
+  );
+
+
+  goToEntryScreen();
+}
+
+
 // ================================================================
-// PAGE CLOSE
+// BROWSER / TAB CLOSED
 // ================================================================
 
 window.addEventListener(
   "beforeunload",
   () => {
-    if (channel) {
-      channel.untrack();
+
+    if (localStream) {
+
+      localStream
+        .getTracks()
+        .forEach(
+          (track) => {
+
+            track.stop();
+          }
+        );
+    }
+
+    if (roomChannel) {
+
+      roomChannel.untrack();
     }
   }
 );
+
 
 // ================================================================
 // INITIALIZATION
@@ -1203,8 +1618,11 @@ updateShareButtons();
 
 switchTab("create");
 
-setConnectionStatus("waiting");
+setConnectionStatus(
+  "waiting"
+);
+
 
 console.log(
-  "✅ ScreenShare Supabase Realtime initialized."
+  "✅ P2P ScreenShare Supabase initialized."
 );
