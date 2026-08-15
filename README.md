@@ -1,138 +1,66 @@
-# P2P ScreenShare — Live Screen Sharing via WebRTC
-
-Aplikasi web untuk live screen sharing / mirroring peer-to-peer (2 pihak) menggunakan WebRTC.
-Server hanya berfungsi sebagai **signaling server** (menjembatani proses handshake awal) —
-video/audio dikirim **langsung antar browser**, tidak lewat server.
-
-## Fitur
-
-- Sistem room privat berbasis **kode + password** (maksimal 2 peserta per room).
-- Screen sharing real-time via `getDisplayMedia()` + WebRTC.
-- Fallback STUN server publik gratis (Google, Mozilla) untuk NAT traversal.
-- Indikator status koneksi real-time: `Connected`, `Disconnecting`, `Reconnecting`, `Disconnected`.
-- UI responsif, minimalis, dark-mode dengan Tailwind CSS (via CDN, tanpa build step).
-
-## Struktur Proyek
-
-```
-screenshare-app/
-├── server.js           # Backend Express + Socket.io (signaling server)
-├── package.json
-├── public/
-│   ├── index.html       # UI utama (entry room + sesi sharing)
-│   └── app.js            # Logika WebRTC + Socket.io client
+P2P ScreenShare (versi Supabase)
+Versi ini tidak butuh server Node.js/Express sama sekali. Semua backend (penyimpanan room + signaling WebRTC) ditangani oleh Supabase:
+Supabase Database → menyimpan room_code + password.
+Supabase Realtime (Broadcast + Presence) → menggantikan Socket.io untuk bertukar offer/answer/ICE candidate serta mendeteksi kapan peer join/leave.
+WebRTC → tetap murni peer-to-peer untuk video/audio; Supabase tidak pernah membawa data screen share itu sendiri.
+Karena tidak ada server custom, project ini cocok 100% untuk Vercel (atau hosting statis apa pun) — cukup upload index.html + app.js.
+Struktur
+screenshare-supabase/
+├── index.html     # UI (Tailwind CDN), memuat supabase-js lalu app.js
+├── app.js          # Semua logika: room, WebRTC, realtime signaling
+├── setup.sql       # Script SQL untuk membuat tabel & RLS policy di Supabase
 └── README.md
-```
-
-## Cara Kerja Singkat
-
-1. User A membuat room → mendapat **kode room** & **password** → dibagikan ke User B (via chat/WA/dsb, di luar aplikasi ini).
-2. User B masuk dengan kode + password yang sama.
-3. Begitu keduanya berada di room yang sama, salah satu pihak menekan **Start Sharing**.
-4. Browser meminta izin `getDisplayMedia()`, lalu membuat **WebRTC offer** yang direlay oleh
-   server ke peer lain lewat Socket.io (`webrtc-offer` → `webrtc-answer` → pertukaran `ICE candidate`).
-5. Setelah negosiasi selesai, video mengalir **langsung P2P** antar browser.
-6. Tombol **Stop Sharing** menghentikan track & menutup peer connection.
-
-## Menjalankan Secara Lokal
-
-### Prasyarat
-- Node.js versi 18 ke atas
-- NPM
-
-### Langkah-langkah
-
-```bash
-# 1. Masuk ke folder proyek
-cd screenshare-app
-
-# 2. Install dependencies
-npm install
-
-# 3. Jalankan server
-npm start
-```
-
-Server akan berjalan di `http://localhost:3001`. Buka URL tersebut di **dua tab/browser/perangkat
-berbeda** untuk mensimulasikan 2 pihak (User A & User B).
-
-> **Catatan penting soal `getDisplayMedia()`:**
-> - Browser modern mensyaratkan koneksi **HTTPS** atau **localhost** untuk mengizinkan akses
->   screen capture. `localhost` aman dipakai untuk testing lokal.
-> - Jika ingin testing dari 2 perangkat fisik berbeda di jaringan lokal (bukan localhost),
->   Anda wajib menggunakan HTTPS (lihat bagian deployment) atau tool tunneling seperti `ngrok`.
-
-### Testing lintas perangkat di jaringan lokal (opsional, pakai ngrok)
-
-```bash
-npx ngrok http 3001
-```
-
-Gunakan URL HTTPS yang diberikan ngrok untuk diakses dari perangkat lain.
-
-## Deployment
-
-Karena ini adalah **single Node.js server** yang menyajikan backend (Socket.io) sekaligus
-frontend statis (folder `public/`), cara paling sederhana adalah deploy sebagai satu service
-di **Render** (atau platform sejenis seperti Railway/Fly.io).
-
-> **Kenapa bukan Vercel untuk backend-nya?** Vercel berbasis serverless functions dan
-> **tidak mendukung koneksi WebSocket persisten** yang dibutuhkan Socket.io untuk signaling.
-> Anda tetap bisa deploy **frontend saja** ke Vercel/Netlify jika backend dipisah, tapi cara
-> termudah adalah deploy semuanya jadi satu di Render.
-
-### Deploy ke Render
-
-1. Push kode ini ke repository GitHub.
-2. Di [Render Dashboard](https://dashboard.render.com), klik **New → Web Service**.
-3. Hubungkan repository GitHub Anda.
-4. Isi konfigurasi:
-   - **Build Command**: `npm install`
-   - **Start Command**: `npm start`
-   - **Environment**: Node
-5. Render otomatis menyediakan **HTTPS** dan environment variable `PORT` — server.js sudah
-   membaca `process.env.PORT` secara otomatis, jadi tidak perlu ubah apa pun.
-6. Setelah deploy selesai, akses URL yang diberikan Render (contoh: `https://nama-app.onrender.com`)
-   dari dua perangkat berbeda untuk mulai screen sharing.
-
-### Catatan tentang TURN server (opsional, untuk jaringan yang lebih ketat)
-
-STUN server gratis (Google, Mozilla) sudah cukup untuk kebanyakan kasus NAT rumahan/kantor.
-Namun jika salah satu pihak berada di balik firewall/NAT simetris yang ketat (jaringan
-korporat, beberapa jaringan seluler), koneksi P2P murni bisa gagal dan **butuh TURN server**
-sebagai relay. Untuk kebutuhan produksi serius, pertimbangkan menambahkan TURN server gratis/
-berbayar (misalnya dari [Metered](https://www.metered.ca/tools/openrelay/) atau
-[Twilio STUN/TURN](https://www.twilio.com/docs/stun-turn)) dengan menambahkan entri baru ke
-array `ICE_SERVERS` di `public/app.js`:
-
-```js
-const ICE_SERVERS = {
-  iceServers: [
-    { urls: "stun:stun.l.google.com:19302" },
-    {
-      urls: "turn:your-turn-server.com:3478",
-      username: "your-username",
-      credential: "your-credential",
-    },
-  ],
-};
-```
-
-## Keamanan & Privasi
-
-- Room dilindungi kombinasi **kode + password**; hanya dua pihak pertama yang tahu kombinasi
-  ini yang bisa bergabung (room otomatis ditolak jika sudah terisi 2 orang).
-- Video/audio **tidak pernah transit lewat server** — server hanya melihat metadata signaling
-  (offer/answer/ICE candidate), bukan konten layar itu sendiri.
-- Room otomatis dihapus dari memori server saat kosong atau kedaluwarsa (6 jam).
-- Untuk produksi jangka panjang dengan banyak room bersamaan, pertimbangkan mengganti
-  penyimpanan room in-memory dengan Redis agar tahan restart server & bisa horizontal scaling.
-
-## Troubleshooting
-
-| Masalah | Kemungkinan Penyebab & Solusi |
-|---|---|
-| Tombol "Start Sharing" tidak muncul dialog pilih layar | Pastikan diakses lewat `https://` atau `localhost`, bukan `http://` biasa di IP lokal. |
-| Status macet di "Reconnecting" | Cek koneksi internet kedua pihak; jika salah satu di jaringan sangat ketat, mungkin perlu TURN server (lihat bagian di atas). |
-| Room "sudah penuh" padahal cuma 1 orang | Kemungkinan tab lama masih terhubung (belum ter-disconnect). Refresh/tutup semua tab lama lalu buat room baru. |
-| Video peer tidak muncul walau status "Connected" | Peer belum menekan "Start Sharing" — status koneksi socket dan status screen-share adalah dua hal berbeda. |
+Setup Supabase (wajib dilakukan sebelum aplikasi bisa jalan)
+1. Buat tabel + RLS policy
+Buka Supabase Dashboard → SQL Editor, jalankan isi file setup.sql (aman dijalankan berkali-kali, tidak akan error meski policy sudah ada).
+Ini akan membuat tabel rooms dengan kolom:
+id (uuid, primary key)
+room_code (text, unik)
+password (text)
+created_at (timestamptz)
+Serta 3 policy untuk role anon: select, insert, delete — supaya aplikasi bisa baca/tulis room langsung dari browser tanpa server perantara.
+2. Pastikan Realtime aktif
+Broadcast & Presence Supabase Realtime biasanya aktif secara default di project baru. Jika sebelumnya pernah dinonaktifkan, cek di Project Settings → Realtime di dashboard Supabase.
+3. Cocokkan kredensial di app.js
+Pastikan SUPABASE_URL dan SUPABASE_PUBLISHABLE_KEY di bagian atas app.js sesuai dengan project Supabase kamu (Project Settings → API). Publishable/anon key aman dipakai di sisi client — itu memang tujuannya, selama RLS policy sudah benar seperti di atas.
+Menjalankan Secara Lokal
+Karena semua file statis (tidak ada backend custom), cukup jalankan static server sederhana, misalnya:
+npx serve .
+# atau
+python3 -m http.server 8080
+Lalu buka http://localhost:8080 (atau port yang ditampilkan) di dua tab browser berbeda untuk simulasi 2 pihak.
+Catatan: getDisplayMedia() (untuk mulai screen share) mensyaratkan HTTPS atau localhost. Testing di localhost aman-aman saja.
+Deploy ke Vercel
+Push folder ini ke GitHub.
+Di Vercel Dashboard, import repo tersebut.
+Vercel akan otomatis mendeteksi ini sebagai static site (tidak perlu Build Command / Output Directory khusus — kosongkan saja atau biarkan default).
+Setelah deploy, akses URL https://nama-app.vercel.app dari dua perangkat berbeda.
+Tidak perlu environment variable apa pun di Vercel karena kredensial Supabase memang ditulis langsung di app.js (publishable key, bukan service_role key — jadi aman untuk publik).
+Cara Kerja Signaling (ringkas)
+User A klik Buat Room → insert row baru ke tabel rooms di Supabase, dapat room_code + password acak (atau custom).
+User A & User B sama-sama join ke Supabase Realtime channel bernama screenshare-{room_code} setelah password tervalidasi lewat query ke tabel rooms.
+Presence dipakai untuk saling tahu "peer sudah ada di room" — begitu presence sync mendeteksi 1 user lain, status berubah jadi connected.
+Saat salah satu pihak klik Start Sharing:
+getDisplayMedia() diminta ke browser.
+RTCPeerConnection dibuat, track layar ditambahkan.
+Offer dikirim lewat roomChannel.send({ type: "broadcast", event: "webrtc-offer", ... }).
+Peer lain menerima broadcast tsb, buat answer, kirim balik.
+ICE candidate saling ditukar lewat broadcast event terpisah.
+Setelah negosiasi ICE selesai, video mengalir langsung P2P antar browser — Supabase sudah tidak terlibat lagi di jalur video.
+Keamanan & Keterbatasan
+Password room disimpan plain text di tabel rooms untuk kesederhanaan. Untuk kebutuhan lebih serius, pertimbangkan hash password (misalnya lewat Supabase Edge Function) alih-alih membandingkan plain text langsung dari client.
+Room tidak otomatis terhapus. Jalankan query pembersihan secara berkala (lihat komentar di akhir setup.sql), atau buat Supabase Edge Function + Cron Job untuk otomatisasi.
+Karena validasi password dilakukan di client (bukan lewat RPC/Edge Function di server), siapa pun dengan akses ke anon key secara teknis bisa membaca seluruh isi tabel rooms (termasuk password room lain) jika ingin mencoba — cukup aman untuk penggunaan personal/casual, tapi bukan level keamanan enterprise. Jika butuh lebih ketat, pindahkan logic validasi password ke Supabase Edge Function/RPC yang menyembunyikan password asli dari response.
+Troubleshooting
+Masalah
+Penyebab & Solusi
+Tombol "Buat Room"/"Gabung Room" tidak merespons
+Cek Console browser — biasanya karena supabase global belum termuat (urutan script salah) atau SUPABASE_URL/key salah.
+"Gagal membuat room" / "Gagal menghubungi database"
+RLS policy belum di-setup dengan benar. Jalankan ulang setup.sql.
+Status macet di "Menunggu peer bergabung..." padahal peer sudah join
+Cek apakah Realtime aktif di project Supabase; cek juga console untuk status channel (SUBSCRIBED/CHANNEL_ERROR).
+Video peer tidak muncul walau status "Connected"
+Peer belum menekan "Start Sharing" — status koneksi presence dan status screen-share adalah dua hal berbeda.
+Room lama menumpuk di database
+Jalankan DELETE FROM rooms WHERE created_at < now() - interval '6 hours'; secara berkala.
