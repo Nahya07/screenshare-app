@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>P2P ScreenShare — Live Screen Mirroring</title>
+
+<!-- Tailwind CSS via CDN -->
+<script src="https://cdn.tailwindcss.com"></script>
+<!-- Socket.io client -->
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+
+<style>
+  body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
+  .glass {
+    background: rgba(255, 255, 255, 0.06);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+  }
+  .pulse-dot { animation: pulse-anim 1.5s ease-in-out infinite; }
+  @keyframes pulse-anim {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.85); }
+  }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 3px; }
+</style>
+</head>
+
+<body class="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 text-slate-100">
+
+  <!-- ============================================================= -->
+  <!-- SCREEN 1: ROOM ENTRY (Login/Join dengan kode privat)          -->
+  <!-- ============================================================= -->
+  <div id="screen-entry" class="min-h-screen flex items-center justify-center px-4 py-10">
+    <div class="w-full max-w-md">
+
+      <div class="text-center mb-8">
+        <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-indigo-500/20 border border-indigo-400/30 mb-4">
+          <svg xmlns="http://www.w3.org/2000/svg" class="w-8 h-8 text-indigo-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25m18 0A2.25 2.25 0 0018.75 3H5.25A2.25 2.25 0 003 5.25m18 0V12a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 12V5.25" />
+          </svg>
+        </div>
+        <h1 class="text-2xl sm:text-3xl font-bold tracking-tight">P2P ScreenShare</h1>
+        <p class="text-slate-400 text-sm mt-2">Mirroring layar langsung, privat, tanpa server perantara video.</p>
+      </div>
+
+      <div class="glass rounded-2xl p-6 shadow-2xl">
+
+        <!-- Tab switch: Buat Room / Gabung Room -->
+        <div class="flex bg-slate-800/60 rounded-xl p-1 mb-6">
+          <button id="tab-create" class="flex-1 py-2 rounded-lg text-sm font-medium transition bg-indigo-600 text-white">Buat Room</button>
+          <button id="tab-join" class="flex-1 py-2 rounded-lg text-sm font-medium transition text-slate-300">Gabung Room</button>
+        </div>
+
+        <!-- Nama pengguna (dipakai di kedua mode) -->
+        <div class="mb-4">
+          <label class="block text-xs font-medium text-slate-400 mb-1.5">Nama Anda</label>
+          <input id="input-name" type="text" placeholder="Contoh: Andi"
+            class="w-full px-4 py-2.5 rounded-xl bg-slate-800/80 border border-slate-700 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none text-sm placeholder-slate-500" />
+        </div>
+
+        <!-- PANEL: Buat Room -->
+        <div id="panel-create">
+          <div class="mb-4">
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">Kode Room (opsional)</label>
+            <input id="create-room-code" type="text" placeholder="Kosongkan untuk otomatis"
+              class="w-full px-4 py-2.5 rounded-xl bg-slate-800/80 border border-slate-700 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none text-sm placeholder-slate-500 uppercase" />
+          </div>
+          <div class="mb-5">
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">Password Room (opsional)</label>
+            <input id="create-room-password" type="text" placeholder="Kosongkan untuk otomatis"
+              class="w-full px-4 py-2.5 rounded-xl bg-slate-800/80 border border-slate-700 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none text-sm placeholder-slate-500" />
+          </div>
+          <button id="btn-create-room"
+            class="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 active:scale-[0.98] transition font-semibold text-sm shadow-lg shadow-indigo-900/40">
+            Buat Room Baru
+          </button>
+
+          <!-- Info room yang berhasil dibuat -->
+          <div id="created-room-info" class="hidden mt-5 p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30">
+            <p class="text-xs text-emerald-300 mb-2">Room berhasil dibuat! Bagikan info berikut ke lawan bicara Anda:</p>
+            <div class="flex items-center justify-between bg-slate-900/60 rounded-lg px-3 py-2 mb-2">
+              <span class="text-xs text-slate-400">Kode Room</span>
+              <span id="display-room-code" class="font-mono font-bold text-emerald-300 tracking-wider"></span>
+            </div>
+            <div class="flex items-center justify-between bg-slate-900/60 rounded-lg px-3 py-2 mb-3">
+              <span class="text-xs text-slate-400">Password</span>
+              <span id="display-room-password" class="font-mono font-bold text-emerald-300 tracking-wider"></span>
+            </div>
+            <button id="btn-enter-created-room" class="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 transition text-sm font-semibold">
+              Masuk ke Room →
+            </button>
+          </div>
+        </div>
+
+        <!-- PANEL: Gabung Room -->
+        <div id="panel-join" class="hidden">
+          <div class="mb-4">
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">Kode Room</label>
+            <input id="join-room-code" type="text" placeholder="Contoh: AB12CD"
+              class="w-full px-4 py-2.5 rounded-xl bg-slate-800/80 border border-slate-700 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none text-sm placeholder-slate-500 uppercase tracking-widest" />
+          </div>
+          <div class="mb-5">
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">Password</label>
+            <input id="join-room-password" type="text" placeholder="Masukkan password"
+              class="w-full px-4 py-2.5 rounded-xl bg-slate-800/80 border border-slate-700 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none text-sm placeholder-slate-500" />
+          </div>
+          <button id="btn-join-room"
+            class="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 active:scale-[0.98] transition font-semibold text-sm shadow-lg shadow-indigo-900/40">
+            Gabung ke Room
+          </button>
+        </div>
+
+        <p id="entry-error" class="hidden mt-4 text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2"></p>
+      </div>
+
+      <p class="text-center text-xs text-slate-500 mt-6">
+        Koneksi video/audio bersifat peer-to-peer (WebRTC). Server hanya menjembatani proses handshake awal.
+      </p>
+    </div>
+  </div>
+
+  <!-- ============================================================= -->
+  <!-- SCREEN 2: ROOM / SHARING SESSION                                -->
+  <!-- ============================================================= -->
+  <div id="screen-room" class="hidden min-h-screen flex flex-col">
+
+    <!-- Top bar -->
+    <header class="glass sticky top-0 z-20 px-4 sm:px-6 py-3 flex items-center justify-between gap-3">
+      <div class="flex items-center gap-3 min-w-0">
+        <div class="w-9 h-9 rounded-lg bg-indigo-500/20 border border-indigo-400/30 flex items-center justify-center shrink-0">
+          <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-indigo-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25m18 0A2.25 2.25 0 0018.75 3H5.25A2.25 2.25 0 003 5.25m18 0V12a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 12V5.25" />
+          </svg>
+        </div>
+        <div class="min-w-0">
+          <p class="text-sm font-semibold truncate">Room: <span id="header-room-code" class="font-mono text-indigo-300"></span></p>
+          <div class="flex items-center gap-1.5">
+            <span id="status-dot" class="w-2 h-2 rounded-full bg-yellow-400 pulse-dot"></span>
+            <span id="status-text" class="text-xs text-slate-400">Menunggu peer bergabung...</span>
+          </div>
+        </div>
+      </div>
+      <button id="btn-leave-room" class="shrink-0 px-3 py-2 rounded-lg bg-red-600/20 hover:bg-red-600/40 border border-red-500/40 text-red-300 text-xs font-medium transition">
+        Keluar
+      </button>
+    </header>
+
+    <!-- Video area -->
+    <main class="flex-1 p-3 sm:p-6 flex flex-col gap-4">
+
+      <div class="flex-1 grid grid-cols-1 lg:grid-cols-2 gap-4">
+
+        <!-- Remote video (layar yang di-share oleh peer) -->
+        <div class="relative rounded-2xl overflow-hidden bg-slate-900 border border-slate-800 flex items-center justify-center min-h-[240px] sm:min-h-[360px]">
+          <video id="remote-video" autoplay playsinline class="w-full h-full object-contain bg-black hidden"></video>
+          <div id="remote-placeholder" class="text-center px-6">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-10 h-10 mx-auto text-slate-600 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+            </svg>
+            <p class="text-sm text-slate-500">Belum ada layar yang dibagikan oleh peer</p>
+          </div>
+          <span class="absolute top-3 left-3 text-[10px] font-semibold bg-black/60 px-2 py-1 rounded-md text-slate-300">LAYAR PEER</span>
+        </div>
+
+        <!-- Local preview (layar sendiri, jika sedang share) -->
+        <div class="relative rounded-2xl overflow-hidden bg-slate-900 border border-slate-800 flex items-center justify-center min-h-[240px] sm:min-h-[360px]">
+          <video id="local-video" autoplay playsinline muted class="w-full h-full object-contain bg-black hidden"></video>
+          <div id="local-placeholder" class="text-center px-6">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-10 h-10 mx-auto text-slate-600 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 10.5l4.72-4.72a.75.75 0 011.28.53v11.38a.75.75 0 01-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 002.25-2.25v-9a2.25 2.25 0 00-2.25-2.25h-9A2.25 2.25 0 002.25 7.5v9a2.25 2.25 0 002.25 2.25z" />
+            </svg>
+            <p class="text-sm text-slate-500">Anda belum membagikan layar</p>
+          </div>
+          <span class="absolute top-3 left-3 text-[10px] font-semibold bg-black/60 px-2 py-1 rounded-md text-slate-300">LAYAR ANDA</span>
+        </div>
+
+      </div>
+
+      <!-- Control bar -->
+      <div class="glass rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-center gap-3">
+        <button id="btn-start-share"
+          class="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] transition font-semibold text-sm shadow-lg shadow-emerald-900/40">
+          <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M3 8.688c0-.864.933-1.406 1.683-.977l7.108 4.062a1.125 1.125 0 010 1.953l-7.108 4.062A1.125 1.125 0 013 16.812V8.688zM12.75 8.688c0-.864.933-1.406 1.683-.977l7.108 4.062a1.125 1.125 0 010 1.953l-7.108 4.062a1.125 1.125 0 01-1.683-.977V8.688z" />
+          </svg>
+          Start Sharing
+        </button>
+        <button id="btn-stop-share" disabled
+          class="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-red-600 hover:bg-red-500 active:scale-[0.98] transition font-semibold text-sm shadow-lg shadow-red-900/40 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-red-600">
+          <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 7.5A2.25 2.25 0 017.5 5.25h9a2.25 2.25 0 012.25 2.25v9a2.25 2.25 0 01-2.25 2.25h-9a2.25 2.25 0 01-2.25-2.25v-9z" />
+          </svg>
+          Stop Sharing
+        </button>
+      </div>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
